@@ -40,18 +40,19 @@ def get_processor_name():
 def get_temperatures():
     temperatures = []
 
-    cpu_max_temp = 0
+    if platform.system() == "Linux":
+        cpu_max_temp = 0
 
-    for k, v in psutil.sensors_temperatures(fahrenheit=False).items():
-        for t in v:
-            if t.current > cpu_max_temp:
-                cpu_max_temp = t.current
+        for k, v in psutil.sensors_temperatures(fahrenheit=False).items():
+            for t in v:
+                if t.current > cpu_max_temp:
+                    cpu_max_temp = t.current
 
-    temperatures.append({
-        "label": get_processor_name(),
-        "temperature": cpu_max_temp,
-        "kind": "CPU",
-    })
+        temperatures.append({
+            "label": get_processor_name(),
+            "temperature": cpu_max_temp,
+            "kind": "CPU",
+        })
 
     for gpu in GPUtil.getGPUs():
         temperatures.append({
