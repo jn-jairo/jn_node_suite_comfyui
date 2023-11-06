@@ -343,7 +343,7 @@ class JN_LoadImageDirectory:
     def INPUT_TYPES(s):
         input_dir = folder_paths.get_input_directory()
         # dirs = sorted([d for d in os.listdir(input_dir) if os.path.isdir(os.path.join(input_dir, d))])
-        dirs = sorted(list(set([d.rstrip("/") for d in glob.iglob("**/**", root_dir=input_dir, recursive=True) if os.path.isdir(os.path.join(input_dir, d))])))
+        dirs = sorted(list(set([d.rstrip("/").rstrip("\\") for d in glob.iglob("**/**", root_dir=input_dir, recursive=True) if os.path.isdir(os.path.join(input_dir, d))])))
         return {
             "required": {
                 "directory": (dirs,),
