@@ -1,4 +1,7 @@
-rembg
-psutil
 gputil
+numpy
 opencv-python
+psutil
+rembg
+torch
+torchvision
