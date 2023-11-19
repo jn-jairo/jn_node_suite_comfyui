@@ -6,8 +6,8 @@ import numpy as np
 import torch
 from torch import nn
 
-from custom_nodes.facerestore.facelib.detection.yolov5face.utils.datasets import letterbox
-from custom_nodes.facerestore.facelib.detection.yolov5face.utils.general import (
+from ..utils.datasets import letterbox
+from ..utils.general import (
     make_divisible,
     non_max_suppression,
     scale_coords,

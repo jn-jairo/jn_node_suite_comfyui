@@ -17,8 +17,8 @@ import comfy.utils
 import numpy as np
 import cv2
 import math
-from custom_nodes.facerestore.facelib.utils.face_restoration_helper import FaceRestoreHelper
-from custom_nodes.facerestore.facelib.detection.retinaface import retinaface
+from .facelib.utils.face_restoration_helper import FaceRestoreHelper
+from .facelib.detection.retinaface import retinaface
 from torchvision.transforms.functional import normalize
 from comfy_extras.chainner_models import model_loading
 
@@ -30,6 +30,14 @@ FACEDETECTION_MODELS = [
     "YOLOv5l",
     "YOLOv5n",
 ]
+
+def detface2area(det_face):
+    return {
+        "x1": round(det_face[0]),
+        "y1": round(det_face[1]),
+        "x2": round(det_face[2]),
+        "y2": round(det_face[3]),
+    }
 
 def img2tensor(imgs, bgr2rgb=True, float32=True):
     """Numpy array to tensor.
@@ -119,7 +127,8 @@ def tensor2img(tensor, rgb2bgr=True, out_type=np.uint8, min_max=(0, 1)):
 
 class JN_FaceRestoreWithModel:
     CATEGORY = CATEGORY_IMAGE
-    RETURN_TYPES = ("IMAGE",)
+    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "ARRAY")
+    RETURN_NAMES = ("IMAGE", "FACES_RESTORED_IMAGE", "FACES_IMAGE", "FACES_AREA_ARRAY")
     FUNCTION = "restore_face"
 
     @classmethod
@@ -142,15 +151,20 @@ class JN_FaceRestoreWithModel:
         if self.face_helper is None:
             self.face_helper = FaceRestoreHelper(1, face_size=512, crop_ratio=(1, 1), det_model=facedetection, save_ext='png', use_parse=True, device=device)
 
-        image_np = 255. * image.cpu().numpy()
+        image_np = 255. * image.clone().cpu().numpy()
 
         total_images = image_np.shape[0]
         out_images = np.ndarray(shape=image_np.shape)
+        out_faces_areas = []
+        out_faces_images_arr = []
+        out_faces_images_restored_arr = []
 
         for i in range(total_images):
             cur_image_np = image_np[i,:, :, ::-1]
 
             original_resolution = cur_image_np.shape[0:2]
+
+            scale = min(1, min(cur_image_np.shape[0], cur_image_np.shape[1]) / 512)
 
             if facerestore_model is None or self.face_helper is None:
                 return image
@@ -180,6 +194,12 @@ class JN_FaceRestoreWithModel:
                 restored_face = restored_face.astype('uint8')
                 self.face_helper.add_restored_face(restored_face)
 
+                cropped_face_t = tensor2img(cropped_face_t, rgb2bgr=True, min_max=(-1, 1)).astype('uint8')
+
+                out_faces_images_arr.append(cv2.cvtColor(cropped_face_t, cv2.COLOR_BGR2RGB))
+                out_faces_images_restored_arr.append(cv2.cvtColor(restored_face, cv2.COLOR_BGR2RGB))
+                out_faces_areas.append(detface2area(list(self.face_helper.det_faces[idx] * scale)))
+
             self.face_helper.get_inverse_affine(None)
 
             restored_img = self.face_helper.paste_faces_to_input_image()
@@ -194,14 +214,32 @@ class JN_FaceRestoreWithModel:
 
             out_images[i] = restored_img
 
+        if len(out_faces_images_arr) > 0:
+            out_faces_images = np.ndarray(shape=(len(out_faces_images_arr), 512, 512, 3))
+            for i, face in enumerate(out_faces_images_arr):
+                out_faces_images[i] = face
+        else:
+            out_faces_images = np.ndarray(shape=(1, 512, 512, 3))
+
+        if len(out_faces_images_restored_arr) > 0:
+            out_faces_images_restored = np.ndarray(shape=(len(out_faces_images_restored_arr), 512, 512, 3))
+            for i, face in enumerate(out_faces_images_restored_arr):
+                out_faces_images_restored[i] = face
+        else:
+            out_faces_images_restored = np.ndarray(shape=(1, 512, 512, 3))
+
+        out_faces_images = torch.from_numpy(np.array(out_faces_images).astype(np.float32) / 255.0)
+        out_faces_images_restored = torch.from_numpy(np.array(out_faces_images_restored).astype(np.float32) / 255.0)
+
         restored_img_np = np.array(out_images).astype(np.float32) / 255.0
         restored_img_tensor = torch.from_numpy(restored_img_np)
 
-        return (restored_img_tensor,)
+        return (restored_img_tensor, out_faces_images_restored, out_faces_images, out_faces_areas)
 
 class JN_CropFace:
     CATEGORY = CATEGORY_IMAGE
     RETURN_TYPES = ("IMAGE", "ARRAY")
+    RETURN_NAMES = ("IMAGE", "AREA_ARRAY")
     FUNCTION = "crop_face"
 
     @classmethod
@@ -221,7 +259,7 @@ class JN_CropFace:
         if self.face_helper is None:
             self.face_helper = FaceRestoreHelper(1, face_size=512, crop_ratio=(1, 1), det_model=facedetection, save_ext='png', use_parse=True, device=device)
 
-        image_np = 255. * image.cpu().numpy()
+        image_np = 255. * image.clone().cpu().numpy()
 
         total_images = image_np.shape[0]
         out_images = np.ndarray(shape=(total_images, 512, 512, 3))
@@ -233,6 +271,8 @@ class JN_CropFace:
             cur_image_np = image_np[i,:, :, ::-1]
 
             original_resolution = cur_image_np.shape[0:2]
+
+            scale = min(1, min(cur_image_np.shape[0], cur_image_np.shape[1]) / 512)
 
             if self.face_helper is None:
                 return image
@@ -246,11 +286,11 @@ class JN_CropFace:
             if faces_found == 0:
                 next_idx += 1 # output black image for no face
             if out_images.shape[0] < next_idx + faces_found:
-                print(out_images.shape)
-                print((next_idx + faces_found, 512, 512, 3))
+                # print(out_images.shape)
+                # print((next_idx + faces_found, 512, 512, 3))
                 # print('aaaaa')
                 out_images = np.resize(out_images, (next_idx + faces_found, 512, 512, 3))
-                print(out_images.shape)
+                # print(out_images.shape)
             for j in range(faces_found):
                 cropped_face_1 = self.face_helper.cropped_faces[j]
                 cropped_face_2 = img2tensor(cropped_face_1 / 255., bgr2rgb=True, float32=True)
@@ -259,7 +299,7 @@ class JN_CropFace:
                 cropped_face_4 = tensor2img(cropped_face_3, rgb2bgr=True, min_max=(-1, 1)).astype('uint8')
                 cropped_face_5 = cv2.cvtColor(cropped_face_4, cv2.COLOR_BGR2RGB)
                 out_images[next_idx] = cropped_face_5
-                out_areas.append(list(self.face_helper.det_faces[j]))
+                out_areas.append(detface2area(list(self.face_helper.det_faces[j] * scale)))
                 next_idx += 1
 
         cropped_face_6 = np.array(out_images).astype(np.float32) / 255.0

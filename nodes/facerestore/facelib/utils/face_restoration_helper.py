@@ -4,9 +4,9 @@ import os
 import torch
 from torchvision.transforms.functional import normalize
 
-from custom_nodes.facerestore.facelib.detection import init_detection_model
-from custom_nodes.facerestore.facelib.parsing import init_parsing_model
-from custom_nodes.facerestore.facelib.utils.misc import img2tensor, imwrite
+from ..detection import init_detection_model
+from ..parsing import init_parsing_model
+from ..utils.misc import img2tensor, imwrite
 
 import model_management
 
