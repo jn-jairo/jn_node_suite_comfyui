@@ -303,9 +303,9 @@ class JN_SelectItem:
         if only_active:
             values = [value for value in values if value is not None]
 
-        index = index % len(values)
-
-        selected = values[index]
+        if len(values) > 0:
+            index = index % len(values)
+            selected = values[index]
 
         return (selected,)
 
