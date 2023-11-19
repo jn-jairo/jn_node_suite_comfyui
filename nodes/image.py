@@ -5,6 +5,7 @@ import glob
 import torch
 import numpy as np
 from PIL import Image, ImageOps
+import math
 import rembg
 import hashlib
 from transformers import BlipProcessor, BlipForConditionalGeneration
@@ -14,6 +15,18 @@ import comfy
 from comfy_extras.nodes_mask import composite
 
 from ..utils import CATEGORY_IMAGE
+
+def resize_background(image, width, height, upscale_method="bilinear", crop="center"):
+    samples = image.movedim(-1,1)
+    s = comfy.utils.common_upscale(samples, width, height, upscale_method, crop)
+    s = s.movedim(1,-1)
+    return s
+
+def create_background(batch_size=1, width=1, height=1, color=0):
+    r = torch.full([batch_size, height, width, 1], ((color >> 16) & 0xFF) / 0xFF)
+    g = torch.full([batch_size, height, width, 1], ((color >> 8) & 0xFF) / 0xFF)
+    b = torch.full([batch_size, height, width, 1], ((color) & 0xFF) / 0xFF)
+    return torch.cat((r, g, b), dim=-1)
 
 def batch_image(image1, image2):
     if image1.shape[1:] != image2.shape[1:]:
@@ -28,7 +41,7 @@ def batch_mask(mask1, mask2):
     s = s.reshape((s.shape[0], s.shape[1], s.shape[2]))
     return s
 
-def normalize_area(area, width=0xffffffffffffffff, height=0xffffffffffffffff, pad=0):
+def normalize_area(area, width=0xffffffffffffffff, height=0xffffffffffffffff, pad=0, multiple_of=1):
     if not isinstance(area, dict):
         if isinstance(area, list):
             x1 = round(area[0])
@@ -48,7 +61,7 @@ def normalize_area(area, width=0xffffffffffffffff, height=0xffffffffffffffff, pa
             "y2": y2,
         }
 
-    multiple_of = 8
+    multiple_of = max(1, multiple_of)
 
     area = dict(area)
     area["x1"] = int(max(round((area["x1"] - pad) / multiple_of) * multiple_of, 0))
@@ -58,7 +71,7 @@ def normalize_area(area, width=0xffffffffffffffff, height=0xffffffffffffffff, pa
 
     return area
 
-def get_crop_region(mask, pad=0):
+def get_crop_region(mask, pad=0, multiple_of=1):
     """finds a rectangular region that contains all masked areas in an image. Returns (x1, y1, x2, y2) coordinates of the rectangle.
     For example, if a user has painted the top-right part of a 512x512 image", the result may be (256, 0, 512, 256)"""
 
@@ -88,7 +101,7 @@ def get_crop_region(mask, pad=0):
             break
         crop_bottom += 1
 
-    multiple_of = 8
+    multiple_of = max(1, multiple_of)
 
     return {
         "x1": int(max(round((crop_left-pad) / multiple_of) * multiple_of, 0)),
@@ -96,6 +109,41 @@ def get_crop_region(mask, pad=0):
         "x2": int(min(round((w - crop_right + pad) / multiple_of) * multiple_of, w)),
         "y2": int(min(round((h - crop_bottom + pad) / multiple_of) * multiple_of, h)),
     }
+
+class JN_AreaNormalize:
+    CATEGORY = CATEGORY_IMAGE
+    RETURN_TYPES = ("AREA",)
+    FUNCTION = "run"
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "area": ("AREA",),
+                "multiple_of": ("INT", {"default": 1, "min": 1, "max": 0xffffffffffffffff}),
+            },
+            "optional": {
+                "image": ("IMAGE",),
+                "width": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "height": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+            },
+        }
+
+    def run(self, area, multiple_of=1, image=None, width=0, height=0):
+        kwargs = {}
+
+        if image is not None:
+            (batches, height, width, channels) = image.shape
+
+        if width > 0:
+            kwargs["width"] = width
+
+        if height > 0:
+            kwargs["height"] = height
+
+        area = normalize_area(area, multiple_of=multiple_of, **kwargs)
+
+        return (area,)
 
 class JN_AreaXY:
     CATEGORY = CATEGORY_IMAGE
@@ -162,23 +210,14 @@ class JN_AreaInfo:
         }
 
     def run(self, area):
-        if isinstance(area, dict):
-            x1 = round(area["x1"])
-            y1 = round(area["y1"])
-            x2 = round(area["x2"])
-            y2 = round(area["y2"])
-        elif isinstance(area, list):
-            x1 = round(area[0])
-            y1 = round(area[1])
-            x2 = round(area[2])
-            y2 = round(area[3])
-        else:
-            x1 = 0
-            y1 = 0
-            x2 = 0
-            y2 = 0
-            
-        width =  x2 - x1
+        area = normalize_area(area)
+
+        x1 = area["x1"]
+        y1 = area["y1"]
+        x2 = area["x2"]
+        y2 = area["y2"]
+        
+        width = x2 - x1
         height = y2 - y1
 
         return (x1, y1, x2, y2, width, height)
@@ -252,7 +291,7 @@ class JN_ImageCrop:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "pad": ("INT", {"default": 100, "min": 0, "max": 0xffffffffffffffff}),
+                "pad": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
             },
             "optional": {
                 "area": ("AREA",),
@@ -266,9 +305,9 @@ class JN_ImageCrop:
             mask = mask.clone().reshape((-1, mask.shape[-2], mask.shape[-1]))
 
         if area is not None:
-            area = normalize_area(area, image.shape[3], image.shape[2], pad)
+            area = normalize_area(area, image.shape[3], image.shape[2], pad, multiple_of=8)
         else:
-            area = get_crop_region(mask, pad)
+            area = get_crop_region(mask, pad, multiple_of=8)
 
         cropped_image = image[:, :, area["y1"]:area["y2"], area["x1"]:area["x2"]]
 
@@ -300,10 +339,214 @@ class JN_ImageUncrop:
             }
         }
 
-    def run(self, destination, source, area, resize_source, mask = None):
+    def run(self, destination, source, area, resize_source, mask=None):
         destination = destination.clone().movedim(-1, 1)
         output = composite(destination, source.movedim(-1, 1), area["x1"], area["y1"], mask, 1, resize_source).movedim(1, -1)
         return (output,)
+
+class JN_ImageCenterArea:
+    CATEGORY = CATEGORY_IMAGE
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "run"
+
+    DIRECTIONS = ["both", "horizontal", "vertical", "none"]
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "direction": (s.DIRECTIONS,),
+            },
+            "optional": {
+                "areas": ("*", {"multiple": True}),
+            },
+        }
+
+    def run(self, image, areas=[], direction="both"):
+        if len(areas) == 0:
+            return (image,)
+
+        def area_around(a, b):
+            a = normalize_area(a)
+            b = normalize_area(b)
+            return normalize_area({
+                "x1": min(a["x1"], b["x1"]),
+                "y1": min(a["y1"], b["y1"]),
+                "x2": max(a["x2"], b["x2"]),
+                "y2": max(a["y2"], b["y2"]),
+            })
+
+        areas = reduce(lambda a, b: (a if isinstance(a, list) else [a]) + (b if isinstance(b, list) else [b]), areas, [None])
+        areas = [area for area in areas if area is not None]
+        area = normalize_area(reduce(lambda a, b: area_around(a, b), areas))
+
+        image = self.center(image.clone().movedim(-1, 1), direction, area).movedim(1, -1)
+
+        return (image,)
+
+    def center(self, image, direction, area):
+        if direction in ["both", "horizontal"]:
+            image = self.center_horizontal(image, area)
+
+        if direction in ["both", "vertical"]:
+            image = self.center_vertical(image, area)
+
+        return image
+
+    def center_horizontal(self, image, area):
+        (batches, channels, height, width) = image.shape
+        area = normalize_area(area, width=width, height=height)
+
+        # Empty area
+        if area["x1"] == 0 and area["x2"] == 0 and area["y1"] == 0 and area["y2"] == 0:
+            return image
+
+        image = image
+
+        center_area_x = area["x1"] + ((area["x2"] - area["x1"]) // 2)
+        center_image_x = width // 2
+
+        tmp = image.clone()
+
+        parts = []
+
+        if center_area_x > center_image_x:
+            # 0 -> center_area_x - center_image_x
+            parts.append(tmp[:, :, 0:height, 0:(center_area_x - center_image_x)])
+            # center_area_x - center_image_x -> center_area_x
+            parts.append(tmp[:, :, 0:height, (center_area_x - center_image_x):center_area_x])
+            # center_area_x -> width
+            parts.append(tmp[:, :, 0:height, center_area_x:width])
+
+            parts = parts[1:] + parts[:1]
+        else:
+            # 0 -> center_area_x
+            parts.append(tmp[:, :, 0:height, 0:center_area_x])
+            # center_area_x -> width - (center_image_x - center_area_x)
+            parts.append(tmp[:, :, 0:height, center_area_x:(width - (center_image_x - center_area_x))])
+            # width - (center_image_x - center_area_x) -> width
+            parts.append(tmp[:, :, 0:height, (width - (center_image_x - center_area_x)):width])
+
+            parts = parts[-1:] + parts[:-1]
+
+        paste_x = 0
+
+        for part in parts:
+            image[:, :, :, paste_x:(paste_x + part.shape[3])] = part
+            paste_x += part.shape[3]
+
+        return image
+
+    def center_vertical(self, image, area):
+        area_vertical = normalize_area([area["y1"], area["x1"], area["y2"], area["x2"]])
+        return self.center_horizontal(image.movedim(2, 3), area_vertical).movedim(3, 2)
+
+class JN_ImageGrid:
+    CATEGORY = CATEGORY_IMAGE
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "run"
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "prevent_empty_spots": ("BOOLEAN", {"default": True}),
+                "columns": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "rows": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "background_color": ("INT", {"default": 0xFFFFFF, "min": 0, "max": 0xFFFFFF, "step": 1, "display": "color"}),
+            },
+            "optional": {
+                "images": ("*", {"multiple": True}),
+            },
+
+        }
+
+    def run(self, prevent_empty_spots=True, columns=0, rows=0, background_color=0xFFFFFF, images=[]):
+        images = reduce(lambda a, b: (a if isinstance(a, list) else [a]) + (b if isinstance(b, list) else [b]), images, [None])
+        images = [image for image in images if image is not None]
+        images = reduce(lambda a, b: (a if isinstance(a, list) else self.batch_to_array(a)) + (b if isinstance(b, list) else self.batch_to_array(b)), images, [])
+
+        len_images = len(images)
+
+        if len_images == 0:
+            empty_image = create_background(width=1, height=1, color=background_color)
+            return (empty_image,)
+
+        if len_images == 1:
+            return (images[0].clone(),)
+
+        if columns == 0 and rows == 0:
+            if prevent_empty_spots:
+                rows = math.floor(math.sqrt(len_images))
+                while len_images % rows != 0:
+                    rows -= 1
+            else:
+                rows = round(math.sqrt(len_images))
+
+        if columns == 0:
+            if rows > len_images:
+                rows = len_images
+            columns = math.ceil(len_images / rows)
+        else:
+            if columns > len_images:
+                columns = len_images
+            rows = math.ceil(len_images / columns)
+
+        columns_width = [0 for i in range(0, columns)]
+        rows_height = [0 for i in range(0, rows)]
+
+        for r in range(0, rows):
+            for c in range(0, columns):
+                i = c + (r * columns)
+                if i < len_images:
+                    w = images[i].shape[2]
+                    h = images[i].shape[1]
+
+                    if w > columns_width[c]:
+                        columns_width[c] = w
+
+                    if h > rows_height[r]:
+                        rows_height[r] = h
+
+        grid_width = sum(columns_width)
+        grid_height = sum(rows_height)
+
+        background = create_background(width=grid_width, height=grid_height, color=background_color).movedim(-1, 1)
+
+        x = 0
+        y = 0
+
+        for r in range(0, rows):
+            x = 0
+            for c in range(0, columns):
+                i = c + (r * columns)
+                cell_width = columns_width[c]
+                cell_height = rows_height[r]
+                if i < len_images:
+                    image = images[i].clone().movedim(-1, 1)
+
+                    w = image.shape[3]
+                    h = image.shape[2]
+
+                    cx = x + (cell_width - w) // 2
+                    cy = y + (cell_height - h) // 2
+
+                    background[:, :, cy:(cy+h), cx:(cx+w)] = image
+
+                x += columns_width[c]
+            y += rows_height[r]
+
+        background = background.movedim(1, -1)
+
+        return (background,)
+
+    def batch_to_array(self, image):
+        shape = list(image.shape)
+        shape[0] = -1
+        image = [image[x].clone().reshape(shape) for x in range(0, image.shape[0])]
+
+        return image
 
 class JN_ImageBatch:
     CATEGORY = CATEGORY_IMAGE
@@ -350,13 +593,18 @@ class JN_LoadImageDirectory:
             },
             "optional": {
                 "recursive": ("BOOLEAN", {"default": True}),
+                "limit": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "offset": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
             },
         }
 
-    def run(self, directory, recursive=True):
+    def run(self, directory, recursive=True, limit=0, offset=0):
         directory_path = folder_paths.get_annotated_filepath(directory)
         # files = sorted([os.path.join(directory, f) for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))])
         files = sorted([os.path.join(directory, f) for f in glob.iglob("**/**", root_dir=directory_path, recursive=recursive) if os.path.isfile(os.path.join(directory_path, f))])
+
+        if limit > 0:
+            files = files[offset:offset+limit]
 
         images = None
         masks = None
@@ -395,10 +643,13 @@ class JN_LoadImageDirectory:
         return (image, mask.unsqueeze(0))
 
     @classmethod
-    def IS_CHANGED(s, directory, recursive=True):
+    def IS_CHANGED(s, directory, recursive=True, limit=0, offset=0):
         directory_path = folder_paths.get_annotated_filepath(directory)
         # files = sorted([os.path.join(directory, f) for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))])
         files = sorted([os.path.join(directory, f) for f in glob.iglob("**/**", root_dir=directory_path, recursive=recursive) if os.path.isfile(os.path.join(directory_path, f))])
+
+        if limit > 0:
+            files = files[offset:offset+limit]
 
         m = hashlib.sha256()
 
@@ -559,25 +810,13 @@ class JN_RemoveBackground:
         mask = image_masked[:, :, :, 3]
 
         if background_image is not None:
-            background = self.resize_background(background_image, image.shape[2], image.shape[1])
+            background = resize_background(background_image, image.shape[2], image.shape[1])
         else:
-            background = self.create_background(image.shape[0], image.shape[2], image.shape[1], background_color)
+            background = create_background(image.shape[0], image.shape[2], image.shape[1], background_color)
 
         image = composite(image.movedim(-1, 1), background.movedim(-1, 1), 0, 0, 1.0 - mask, 1, False).movedim(1, -1)
 
         return (image_masked, image, mask)
-
-    def resize_background(self, image, width, height, upscale_method="bilinear", crop="center"):
-        samples = image.movedim(-1,1)
-        s = comfy.utils.common_upscale(samples, width, height, upscale_method, crop)
-        s = s.movedim(1,-1)
-        return s
-
-    def create_background(self, batch_size, width, height, color):
-        r = torch.full([batch_size, height, width, 1], ((color >> 16) & 0xFF) / 0xFF)
-        g = torch.full([batch_size, height, width, 1], ((color >> 8) & 0xFF) / 0xFF)
-        b = torch.full([batch_size, height, width, 1], ((color) & 0xFF) / 0xFF)
-        return torch.cat((r, g, b), dim=-1)
 
 NODE_CLASS_MAPPINGS = {
     "JN_ImageInfo": JN_ImageInfo,
@@ -585,8 +824,11 @@ NODE_CLASS_MAPPINGS = {
     "JN_ImageAddMask": JN_ImageAddMask,
     "JN_ImageCrop": JN_ImageCrop,
     "JN_ImageUncrop": JN_ImageUncrop,
+    "JN_ImageCenterArea": JN_ImageCenterArea,
+    "JN_ImageGrid": JN_ImageGrid,
     "JN_ImageBatch": JN_ImageBatch,
     "JN_LoadImageDirectory": JN_LoadImageDirectory,
+    "JN_AreaNormalize": JN_AreaNormalize,
     "JN_AreaXY": JN_AreaXY,
     "JN_AreaWidthHeight": JN_AreaWidthHeight,
     "JN_AreaInfo": JN_AreaInfo,
@@ -601,8 +843,11 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "JN_ImageAddMask": "Image Add Mask",
     "JN_ImageCrop": "Image Crop",
     "JN_ImageUncrop": "Image Uncrop",
+    "JN_ImageCenterArea": "Image Center Area",
+    "JN_ImageGrid": "Image Grid",
     "JN_ImageBatch": "Image Batch",
     "JN_LoadImageDirectory": "Load Image Directory",
+    "JN_AreaNormalize": "Area Normalize",
     "JN_AreaXY": "Area X Y",
     "JN_AreaWidthHeight": "Area Width Height",
     "JN_AreaInfo": "Area Info",
