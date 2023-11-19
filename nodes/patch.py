@@ -65,7 +65,7 @@ class JN_SeamlessBorder:
             },
         }
 
-    def run(self, model, direction="both", border=16, start_percent=0.0, end_percent=1.0):
+    def run(self, model, direction="both", border=32, start_percent=0.0, end_percent=1.0):
         params = {
             "direction": direction,
             "border": border,
@@ -75,8 +75,8 @@ class JN_SeamlessBorder:
 
         border_latent = max(1, border // 8)
 
-        sigma_start = model.model.model_sampling.percent_to_sigma(start_percent).item()
-        sigma_end = model.model.model_sampling.percent_to_sigma(end_percent).item()
+        sigma_start = model.model.model_sampling.percent_to_sigma(start_percent)
+        sigma_end = model.model.model_sampling.percent_to_sigma(end_percent)
 
         model_options = model.model_options
 
