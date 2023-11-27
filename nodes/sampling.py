@@ -1,0 +1,517 @@
+from functools import reduce
+import torch
+import math
+
+from utils import CATEGORY_SAMPLING
+
+import comfy
+from comfy import model_management
+from nodes import common_ksampler, MAX_RESOLUTION, VAEEncode, VAEDecode, EmptyLatentImage
+from comfy_extras.nodes_mask import composite
+from comfy.sd import VAE
+from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
+
+class JN_VAE:
+    def __init__(self, vae, tile_size, fallback_method, *args, **kwargs):
+        self.vae = vae
+        self.tile_size = max(64, tile_size)
+        self.fallback_method = fallback_method
+
+    def __getattr__(self, attr):
+        return getattr(self.vae, attr)
+
+    def decode(self, samples_in):
+        self.first_stage_model = self.first_stage_model.to(self.device)
+        pixel_samples = None
+
+        try:
+            pixel_samples = self.decode_(samples_in, device=self.device)
+
+        except model_management.OOM_EXCEPTION as e:
+            pixel_samples = None
+
+            if self.fallback_method == "tile":
+                tile_size = 64
+                while tile_size >= 8:
+                    overlap = tile_size // 4
+                    print(f"Warning: Ran out of memory when regular VAE decoding, retrying with tiled VAE decoding with tile size {tile_size} and overlap {overlap}.")
+                    try:
+                        pixel_samples = self.decode_tiled_(samples_in, tile_x=tile_size, tile_y=tile_size, overlap=overlap)
+                        break
+                    except model_management.OOM_EXCEPTION as e:
+                        pass
+                    tile_size -= 8
+
+            if self.fallback_method == "cpu":
+                print(f"Warning: Ran out of memory when regular VAE decoding, retrying with tiled VAE decoding with CPU.")
+                self.first_stage_model = self.first_stage_model.to(torch.device("cpu"))
+                try:
+                    pixel_samples = self.decode_(samples_in, device=torch.device("cpu"))
+                except model_management.OOM_EXCEPTION as e:
+                    pass
+
+            if pixel_samples is None:
+                raise e
+
+        finally:
+            self.first_stage_model = self.first_stage_model.to(self.offload_device)
+
+        pixel_samples = pixel_samples.cpu().movedim(1,-1)
+
+        return pixel_samples
+
+    def decode_(self, samples_in, device):
+        memory_used = 2562 * samples_in.shape[2] * samples_in.shape[3] * 64 * 1.7
+        model_management.free_memory(memory_used, device)
+        free_memory = model_management.get_free_memory(device)
+        batch_number = int(free_memory / memory_used)
+        batch_number = max(1, batch_number)
+
+        pixel_samples = torch.empty((samples_in.shape[0], 3, round(samples_in.shape[2] * 8), round(samples_in.shape[3] * 8)), 'cpu', **('device',))
+
+        for x in range(0, samples_in.shape[0], batch_number):
+            samples = samples_in[x:x + batch_number].to(self.vae_dtype).to(device)
+            pixel_samples[x:x + batch_number] = torch.clamp((self.first_stage_model.decode(samples).cpu().float() + 1) / 2, 0, 1, **('min', 'max'))
+
+        return pixel_samples
+
+    def encode(self, pixel_samples):
+        self.first_stage_model = self.first_stage_model.to(self.device)
+        pixel_samples = pixel_samples.movedim(-1,1)
+        samples = None
+
+        try:
+            samples = self.encode_(pixel_samples, device=self.device)
+
+        except model_management.OOM_EXCEPTION as e:
+            samples = None
+
+            if self.fallback_method == "tile":
+                tile_size = 512
+                while tile_size >= 64:
+                    overlap = tile_size // 8
+                    print(f"Warning: Ran out of memory when regular VAE encoding, retrying with tiled VAE encoding with tile size {tile_size} and overlap {overlap}.")
+                    try:
+                        samples = self.encode_tiled_(pixel_samples, tile_x=tile_size, tile_y=tile_size, overlap=overlap)
+                        break
+                    except model_management.OOM_EXCEPTION as e:
+                        pass
+                    tile_size -= 64
+
+            if self.fallback_method == "cpu":
+                print(f"Warning: Ran out of memory when regular VAE encoding, retrying with tiled VAE encoding with CPU.")
+                self.first_stage_model = self.first_stage_model.to(torch.device("cpu"))
+                try:
+                    samples = self.encode_(pixel_samples, device=torch.device("cpu"))
+                except model_management.OOM_EXCEPTION as e:
+                    pass
+
+            if samples is None:
+                raise e
+
+        finally:
+            self.first_stage_model = self.first_stage_model.to(self.offload_device)
+
+        return samples
+
+    def encode_(self, pixel_samples, device):
+        memory_used = 2078 * pixel_samples.shape[2] * pixel_samples.shape[3] * 1.7
+        model_management.free_memory(memory_used, device)
+        free_memory = model_management.get_free_memory(device)
+        batch_number = int(free_memory / memory_used)
+        batch_number = max(1, batch_number)
+
+        samples = torch.empty((pixel_samples.shape[0], 4, round(pixel_samples.shape[2] // 8), round(pixel_samples.shape[3] // 8)), 'cpu', **('device',))
+
+        for x in range(0, pixel_samples.shape[0], batch_number):
+            pixels_in = (2 * pixel_samples[x:x + batch_number] - 1).to(self.vae_dtype).to(device)
+            samples[x:x + batch_number] = self.first_stage_model.encode(pixels_in).cpu().float()
+
+        return samples
+
+class JN_VAEPatch:
+    CATEGORY = CATEGORY_SAMPLING
+    RETURN_TYPES = ('VAE',)
+    FUNCTION = 'run'
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            'required': {
+                'vae': ('VAE',),
+                'fallback_method': (['tile', 'cpu'],),
+                'tile_size': ('INT', {'default': 512, 'min': 64, 'max': 4096, 'step': 64}),
+            },
+        }
+
+    def run(self, vae, fallback_method, tile_size, **kwargs):
+        vae_wrapper = JN_VAE(vae=vae, tile_size=tile_size, fallback_method=fallback_method)
+        return (vae_wrapper,)
+
+class JN_KSamplerAdvancedParams:
+    CATEGORY = CATEGORY_SAMPLING
+    RETURN_TYPES = ('PARAMS',)
+    FUNCTION = 'run'
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            'required': {
+                'add_noise': ('BOOLEAN', {'default': True}),
+                'return_with_leftover_noise': ('BOOLEAN', {'default': False}),
+                'start_at_step': ('INT', {'default': 0, 'min': 0, 'max': 10000}),
+            },
+        }
+
+    def run(self, add_noise=True, return_with_leftover_noise=False, start_at_step=0, end_at_step=10000, **kwargs):
+        params = {
+            '__type__': 'JN_KSamplerAdvancedParams',
+            'add_noise': add_noise,
+            'return_with_leftover_noise': return_with_leftover_noise,
+            'start_at_step': start_at_step,
+            'end_at_step': end_at_step,
+        }
+        return (params,)
+
+class JN_KSamplerSeamlessParams:
+    CATEGORY = CATEGORY_SAMPLING
+    RETURN_TYPES = ('PARAMS',)
+    FUNCTION = 'run'
+    DIRECTIONS = ['both', 'horizontal', 'vertical']
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            'required': {
+                'direction': (s.DIRECTIONS,),
+                'border_percent': ('FLOAT', {'default': 0.125, 'min': 0, 'max': 0.25, 'step': 0.001}),
+                'start_percent': ('FLOAT', {'default': 0, 'min': 0, 'max': 1, 'step': 0.001}),
+                'end_percent': ('FLOAT', {'default': 1, 'min': 0, 'max': 1, 'step': 0.001}),
+            },
+        }
+
+    def run(self, direction="both", border_percent=0.125, start_percent=0, end_percent=1, **kwargs):
+        params = {
+            '__type__': 'JN_KSamplerSeamlessParams',
+            'direction': direction,
+            'border_percent': border_percent,
+            'start_percent': start_percent,
+            'end_percent': end_percent,
+        }
+        return (params,)
+
+class JN_KSamplerTileParams:
+    CATEGORY = CATEGORY_SAMPLING
+    RETURN_TYPES = ('PARAMS',)
+    FUNCTION = 'run'
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            'required': {
+                'width': ('INT', {'default': 0, 'min': 0, 'max': MAX_RESOLUTION, 'step': 8}),
+                'height': ('INT', {'default': 0, 'min': 0, 'max': MAX_RESOLUTION, 'step': 8}),
+                'overlay_percent': ('FLOAT', {'default': 0.125, 'min': 0, 'max': 1, 'step': 0.001}),
+            },
+        }
+
+    def run(self, width=0, height=0, overlay_percent=0.125, **kwargs):
+        params = {
+            '__type__': 'JN_KSamplerTileParams',
+            'width': width,
+            'height': height,
+            'overlay_percent': overlay_percent,
+        }
+        return (params,)
+
+class JN_KSamplerResizeInputParams:
+    CATEGORY = CATEGORY_SAMPLING
+    RETURN_TYPES = ('PARAMS',)
+    FUNCTION = 'run'
+    RESIZE_METHODS = ['nearest-exact', 'bilinear', 'area', 'bicubic', 'lanczos', 'bislerp']
+    CROP_METHODS = ['disabled', 'center']
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            'required': {
+                'method': (s.RESIZE_METHODS,),
+                'crop': (s.CROP_METHODS,),
+            },
+            'optional': {
+                'upscale_model': ('UPSCALE_MODEL',),
+            },
+        }
+
+    def run(self, method="nearest-exact", crop="disabled", upscale_model=None, **kwargs):
+        params = {
+            '__type__': 'JN_KSamplerResizeInputParams',
+            'method': method,
+            'crop': crop,
+            'upscale_model': upscale_model,
+        }
+        return (params,)
+
+class JN_KSamplerResizeOutputParams:
+    CATEGORY = CATEGORY_SAMPLING
+    RETURN_TYPES = ('PARAMS',)
+    FUNCTION = 'run'
+    RESIZE_METHODS = ['nearest-exact', 'bilinear', 'area', 'bicubic', 'lanczos', 'bislerp']
+    CROP_METHODS = ['disabled', 'center']
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            'required': {
+                'method': (s.RESIZE_METHODS,),
+                'crop': (s.CROP_METHODS,),
+                'width': ('INT', {'default': 0, 'min': 0, 'max': MAX_RESOLUTION, 'step': 8}),
+                'height': ('INT', {'default': 0, 'min': 0, 'max': MAX_RESOLUTION, 'step': 8}),
+                'scale_by': ('FLOAT', {'default': 0, 'min': 0, 'max': 8, 'step': 0.01}),
+            },
+            'optional': {
+                'upscale_model': ('UPSCALE_MODEL',),
+            },
+    }
+
+    def run(self, method="nearest-exact", crop="disabled", width=0, height=0, scale_by=0, upscale_model=None, **kwargs):
+        params = {
+            '__type__': 'JN_KSamplerResizeOutputParams',
+            'method': method,
+            'crop': crop,
+            'width': width,
+            'height': height,
+            'scale_by': scale_by,
+            'upscale_model': upscale_model,
+        }
+        return (params,)
+
+class JN_KSampler:
+    CATEGORY = CATEGORY_SAMPLING
+    RETURN_TYPES = ('LATENT', 'IMAGE', 'IMAGE', 'LATENT', 'IMAGE')
+    RETURN_NAMES = ('LATENT', 'IMAGE', 'FINAL_IMAGE', 'INPUT_LATENT', 'INPUT_IMAGE')
+    FUNCTION = 'sample'
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            'required': {
+                'model': ('MODEL',),
+                'vae': ('VAE',),
+                'seed': ('INT', {'default': 0, 'min': 0, 'max': 0xffffffffffffffff}),
+                'steps': ('INT', {'default': 20, 'min': 1, 'max': 10000}),
+                'cfg': ('FLOAT', {'default': 8, 'min': 0, 'max': 100, 'step': 0.1, 'round': 0.01}),
+                'sampler_name': (comfy.samplers.KSampler.SAMPLERS,),
+                'scheduler': (comfy.samplers.KSampler.SCHEDULERS,),
+                'positive': ('CONDITIONING',),
+                'negative': ('CONDITIONING',),
+                'denoise': ('FLOAT', {'default': 1, 'min': 0, 'max': 1, 'step': 0.01}),
+                'decode_image': ('BOOLEAN', {'default': True}),
+            },
+            'optional': {
+                'latent_image': ('LATENT',),
+                'image': ('IMAGE',),
+                'width': ('INT', {'default': 512, 'min': 0, 'max': MAX_RESOLUTION, 'step': 8}),
+                'height': ('INT', {'default': 512, 'min': 0, 'max': MAX_RESOLUTION, 'step': 8}),
+                'batch_size': ('INT', {'default': 1, 'min': 1, 'max': 4096}),
+                'params': ('*', {'multiple': True}),
+            },
+        }
+
+    def sample(self, model, vae, seed, steps, cfg, sampler_name, scheduler, positive, negative, denoise=1,
+            decode_image=True,
+            resize_input=False,
+            latent_image=None, image=None,
+            width=512, height=512, batch_size=1,
+            params=[],
+            **kwargs):
+        params = reduce(lambda a, b: (a if isinstance(a, list) else [a]) + (b if isinstance(b, list) else [b]), params, [None])
+        params = [param for param in params if param is not None]
+        options = {param["__type__"]: param for param in params if "__type__" in param}
+
+        advanced_params = options['JN_KSamplerAdvancedParams'] if 'JN_KSamplerAdvancedParams' in options else None
+        seamless_params = options['JN_KSamplerSeamlessParams'] if 'JN_KSamplerSeamlessParams' in options else None
+        tile_params = options['JN_KSamplerTileParams'] if 'JN_KSamplerTileParams' in options else None
+        resize_input_params = options['JN_KSamplerResizeInputParams'] if 'JN_KSamplerResizeInputParams' in options else None
+        resize_output_params = options['JN_KSamplerResizeOutputParams'] if 'JN_KSamplerResizeOutputParams' in options else None
+
+        if tile_params and tile_params['width'] == 0 and tile_params['height'] == 0:
+            tile_params = None
+
+        if image is not None and resize_input_params is not None:
+            image = self.resize(image, **resize_input_params)
+
+        if latent_image is None:
+            if image is not None:
+                latent_image = VAEEncode().encode(vae=vae, pixels=image.clone())[0]
+            else:
+                latent_image = EmptyLatentImage().generate(width=width, height=height, batch_size=batch_size)[0]
+
+        if resize_input_params is not None:
+            latent_image["samples"] = self.resize(latent_image["samples"], samples_type="latent", **resize_input_params)
+
+        if advanced_params is not None:
+            disable_noise = not advanced_params["add_noise"]
+            force_full_denoise = not advanced_params["return_with_leftover_noise"]
+            start_step = advanced_params["start_at_step"]
+            last_step = advanced_params["end_at_step"]
+        else:
+            disable_noise = False
+            force_full_denoise = False
+            start_step = None
+            last_step = None
+
+        common_ksampler_params = {
+            "model": model,
+            "seed": seed,
+            "steps": steps,
+            "cfg": cfg,
+            "sampler_name": sampler_name,
+            "scheduler": scheduler,
+            "positive": positive,
+            "negative": negative,
+            "latent": latent_image,
+            "denoise": denoise,
+            "disable_noise": disable_noise,
+            "start_step": start_step,
+            "last_step": last_step,
+            "force_full_denoise": force_full_denoise,
+        }
+
+        if tile_params is not None:
+            output_latent = self.tiled_ksampler(**tile_params, common_ksampler_params=common_ksampler_params, seamless_params=seamless_params)
+        else:
+            if seamless_params is not None:
+                common_ksampler_params["model"] = self.seamless_patch(model, **seamless_params)
+
+            output_latent = common_ksampler(**common_ksampler_params)[0]
+
+        output_image = None
+        final_image = None
+
+        if decode_image:
+            final_image = output_image = VAEDecode().decode(vae=vae, samples=output_latent)[0]
+
+            if resize_output_params is not None:
+                final_image = output_image = self.resize(output_image, **resize_output_params)
+
+            if seamless_params is not None:
+                final_image = self.seamless_crop(final_image, **seamless_params)
+
+        if resize_output_params is not None:
+            output_latent["samples"] = self.resize(output_latent["samples"], samples_type="latent", **resize_output_params)
+
+        return (output_latent, output_image, final_image, latent_image, image)
+
+    def tiled_ksampler(self, width, height, overlay_percent, common_ksampler_params=None, seamless_params=None, **kwargs):
+        latent_image = common_ksampler_params['latent']
+        latent_width = latent_image['samples'].shape[3]
+        latent_height = latent_image['samples'].shape[2]
+    # WARNING: Decompyle incomplete
+
+    def resize(self, samples, width, height, method, crop, upscale_model=None, scale_by=0, samples_type="image", **kwargs):
+        if scale_by > 0:
+            width = round(samples.shape[3] * scale_by)
+            height = round(samples.shape[2] * scale_by)
+        elif width == 0:
+            width = max(1, round(samples.shape[3] * height / samples.shape[2]))
+        elif height == 0:
+            height = max(1, round(samples.shape[2] * width / samples.shape[3]))
+
+        if width == samples.shape[3] and height == samples.shape[2]:
+            return samples
+
+        if upscale_model is not None and samples_type == "image":
+            samples = ImageUpscaleWithModel().upscale(upscale_model, samples.clone().movedim(1, -1))[0].movedim(-1, 1)
+
+            if width == samples.shape[3] and height == samples.shape[2]:
+                return samples
+
+        return comfy.utils.common_upscale(samples, width, height, method, crop)
+
+    def seamless_crop(self, image, direction, border_percent, **kwargs):
+        def crop(tensor, direction, border_percent):
+            (batch_size, channels, height, width) = tensor.shape
+            if direction in ('both', 'horizontal'):
+                gap = min(round(width * border_percent), width // 4)
+                tensor = tensor[(:, :, :, gap:-gap)]
+            if direction in ('both', 'vertical'):
+                gap = min(round(height * border_percent), height // 4)
+                tensor = tensor[(:, :, gap:-gap, :)]
+            return tensor
+
+        return crop(image.clone().movedim(-1, 1), direction, border_percent).movedim(1, -1)
+
+    def seamless_patch(self, model, direction, border_percent, start_percent, end_percent, **kwargs):
+        sigma_start = model.model.model_sampling.percent_to_sigma(start_percent)
+        sigma_end = model.model.model_sampling.percent_to_sigma(end_percent)
+        model_options = model.model_options
+
+        def apply_seamless(tensor, direction, border_percent):
+            (batch_size, channels, height, width) = tensor.shape
+
+            if direction in ('both', 'horizontal'):
+                gap = min(round(width * border_percent), width // 4)
+                tensor[(:, :, :, -gap:)] = tensor[(:, :, :, gap:gap * 2)]
+                tensor[(:, :, :, :gap)] = tensor[(:, :, :, -(gap * 2):-gap)]
+
+            if direction in ('both', 'vertical'):
+                gap = min(round(height * border_percent), height // 4)
+                tensor[(:, :, -gap:, :)] = tensor[(:, :, gap:gap * 2, :)]
+                tensor[(:, :, :gap, :)] = tensor[(:, :, -(gap * 2):-gap, :)]
+
+            return tensor
+
+        def unet_wrapper_function(apply_model, options):
+            input_x = options["input"]
+            timestep_ = options["timestep"]
+            c = options["c"]
+
+            sigma = timestep_[0].item()
+
+            if sigma <= sigma_start and sigma >= sigma_end:
+                input_x = apply_seamless(input_x, direction, border_percent)
+
+            if 'model_function_wrapper' in model_options:
+                output = model_options['model_function_wrapper'](apply_model, options)
+            else:
+                output = apply_model(input_x, timestep_, **c)
+
+            if sigma <= sigma_start and sigma >= sigma_end:
+                output = apply_seamless(output, direction, border_percent)
+
+            return output
+
+        m = model.clone()
+        m.set_model_unet_function_wrapper(unet_wrapper_function)
+        return m
+
+    @staticmethod
+    def vae_encode_crop_pixels(pixels):
+        x = (pixels.shape[1] // 8) * 8
+        y = (pixels.shape[2] // 8) * 8
+        if pixels.shape[1] != x or pixels.shape[2] != y:
+            x_offset = (pixels.shape[1] % 8) // 2
+            y_offset = (pixels.shape[2] % 8) // 2
+            pixels = pixels[:, x_offset:x + x_offset, y_offset:y + y_offset, :]
+        return pixels
+
+NODE_CLASS_MAPPINGS = {
+    'JN_KSampler': JN_KSampler,
+    'JN_KSamplerAdvancedParams': JN_KSamplerAdvancedParams,
+    'JN_KSamplerResizeInputParams': JN_KSamplerResizeInputParams,
+    'JN_KSamplerResizeOutputParams': JN_KSamplerResizeOutputParams,
+    'JN_KSamplerSeamlessParams': JN_KSamplerSeamlessParams,
+    'JN_KSamplerTileParams': JN_KSamplerTileParams,
+    'JN_VAEPatch': JN_VAEPatch,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    'JN_KSampler': 'KSampler',
+    'JN_KSamplerAdvancedParams': 'KSampler Advanced Params',
+    'JN_KSamplerResizeInputParams': 'KSampler Resize Input Params',
+    'JN_KSamplerResizeOutputParams': 'KSampler Resize Output Params',
+    'JN_KSamplerSeamlessParams': 'KSampler Seamless Params',
+    'JN_KSamplerTileParams': 'KSampler Tile Params',
+    'JN_VAEPatch': 'VAE Patch',
+}
