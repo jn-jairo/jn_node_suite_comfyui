@@ -2,7 +2,7 @@ from functools import reduce
 import torch
 import math
 
-from utils import CATEGORY_SAMPLING
+from ..utils import CATEGORY_SAMPLING
 
 import comfy
 from comfy import model_management
@@ -10,6 +10,21 @@ from nodes import common_ksampler, MAX_RESOLUTION, VAEEncode, VAEDecode, EmptyLa
 from comfy_extras.nodes_mask import composite
 from comfy.sd import VAE
 from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
+
+def apply_seamless(tensor, direction, border_percent):
+    (batch_size, channels, height, width) = tensor.shape
+
+    if direction in ('both', 'horizontal'):
+        gap = min(round(width * border_percent), width // 4)
+        tensor[:, :, :, -gap:] = tensor[:, :, :, gap:gap * 2]
+        tensor[:, :, :, :gap] = tensor[:, :, :, -(gap * 2):-gap]
+
+    if direction in ('both', 'vertical'):
+        gap = min(round(height * border_percent), height // 4)
+        tensor[:, :, -gap:, :] = tensor[:, :, gap:gap * 2, :]
+        tensor[:, :, :gap, :] = tensor[:, :, -(gap * 2):-gap, :]
+
+    return tensor
 
 class JN_VAE:
     def __init__(self, vae, tile_size, fallback_method, *args, **kwargs):
@@ -211,16 +226,18 @@ class JN_KSamplerTileParams:
             'required': {
                 'width': ('INT', {'default': 0, 'min': 0, 'max': MAX_RESOLUTION, 'step': 8}),
                 'height': ('INT', {'default': 0, 'min': 0, 'max': MAX_RESOLUTION, 'step': 8}),
-                'overlay_percent': ('FLOAT', {'default': 0.125, 'min': 0, 'max': 1, 'step': 0.001}),
+                'overlay_percent': ('FLOAT', {'default': 0.5, 'min': 0, 'max': 1, 'step': 0.001}),
+                'steps_chunk': ('INT', {'default': 1, 'min': 1, 'max': 10000}),
             },
         }
 
-    def run(self, width=0, height=0, overlay_percent=0.125, **kwargs):
+    def run(self, width=0, height=0, overlay_percent=0.5, steps_chunk=1, **kwargs):
         params = {
             '__type__': 'JN_KSamplerTileParams',
             'width': width,
             'height': height,
             'overlay_percent': overlay_percent,
+            "steps_chunk": steps_chunk,
         }
         return (params,)
 
@@ -339,7 +356,7 @@ class JN_KSampler:
             tile_params = None
 
         if image is not None and resize_input_params is not None:
-            image = self.resize(image, **resize_input_params)
+            image = self.resize(image.clone().movedim(-1, 1), **resize_input_params).movedim(1, -1)
 
         if latent_image is None:
             if image is not None:
@@ -393,7 +410,7 @@ class JN_KSampler:
             final_image = output_image = VAEDecode().decode(vae=vae, samples=output_latent)[0]
 
             if resize_output_params is not None:
-                final_image = output_image = self.resize(output_image, **resize_output_params)
+                final_image = output_image = self.resize(output_image.clone().movedim(-1, 1), **resize_output_params).movedim(1, -1)
 
             if seamless_params is not None:
                 final_image = self.seamless_crop(final_image, **seamless_params)
@@ -403,11 +420,159 @@ class JN_KSampler:
 
         return (output_latent, output_image, final_image, latent_image, image)
 
-    def tiled_ksampler(self, width, height, overlay_percent, common_ksampler_params=None, seamless_params=None, **kwargs):
+    def tiled_ksampler(self, width, height, overlay_percent, steps_chunk=1, common_ksampler_params=None, seamless_params=None, **kwargs):
         latent_image = common_ksampler_params['latent']
         latent_width = latent_image['samples'].shape[3]
         latent_height = latent_image['samples'].shape[2]
-    # WARNING: Decompyle incomplete
+
+        width = width // 8
+        height = height // 8
+
+        if width == 0:
+            width = max(4, round(height * latent_width / latent_height))
+        if height == 0:
+            height = max(4, round(width * latent_height / latent_width))
+
+        columns = math.ceil(latent_width / width)
+        rows = math.ceil(latent_height / height)
+
+        width = latent_width // columns
+        height = latent_height // rows
+
+        overlay_width = max(2, round(width * overlay_percent * 2))
+        overlay_height = max(2, round(height * overlay_percent * 2))
+
+        half_overlay_width = overlay_width // 2
+        half_overlay_height = overlay_height // 2
+
+        mask_overlay_width = overlay_width // 2
+        mask_overlay_height = overlay_height // 2
+
+        total_tiles = columns * rows
+
+        tiles = [None for i in range(total_tiles)]
+
+        y = 0
+
+        for r in range(0, rows):
+            x = 0
+
+            for c in range(0, columns):
+                i = c + (r * columns)
+
+                tw = width
+                th = height
+
+                tx = x
+                ty = y
+
+                # left overlay
+                if c > 0:
+                    tx -= half_overlay_width
+                    tw += half_overlay_width
+
+                # top overlay
+                if r > 0:
+                    ty -= half_overlay_height
+                    th += half_overlay_height
+
+                # right overlay
+                if c + 1 < columns:
+                    tw += half_overlay_width
+
+                # bottom overlay
+                if r + 1 < rows:
+                    th += half_overlay_height
+
+                tw = min(tw, latent_width - tx)
+                th = min(th, latent_height - ty)
+
+                tiles[i] = {
+                    "column": c,
+                    "row": r,
+                    "x": tx,
+                    "y": ty,
+                    "width": tw,
+                    "height": th,
+                }
+
+                x += width
+
+            y += height
+
+        output_latent = latent_image.copy()
+        output_latent["samples"] = latent_image["samples"].clone()
+
+        steps = common_ksampler_params["steps"]
+
+        if seamless_params is not None:
+            seamless_start_step = steps * seamless_params["start_percent"]
+            seamless_end_step = steps * seamless_params["end_percent"]
+        else:
+            seamless_start_step = 0
+            seamless_end_step = steps
+
+        for step in range(0, steps, steps_chunk):
+            for tile in tiles:
+                c = tile["column"]
+                r = tile["row"]
+                x = tile["x"]
+                y = tile["y"]
+                w = tile["width"]
+                h = tile["height"]
+
+                print(f"Step: {step}-{step + steps_chunk}/{steps} Tile: {c+1}x{r+1} => {x*8}-{(x+w)*8}:{y*8}-{(y+h)*8} => {w*8}x{h*8}")
+
+                if seamless_params is not None and step + 1 >= seamless_start_step and step + steps_chunk <= seamless_end_step:
+                    output_latent["samples"] = apply_seamless(output_latent["samples"], seamless_params["direction"], seamless_params["border_percent"])
+
+                latent = output_latent.copy()
+                latent["samples"] = output_latent["samples"][:, :, y:y+h, x:x+w].clone()
+
+                mask = torch.ones((latent["samples"].shape[0], latent["samples"].shape[2], latent["samples"].shape[3]))
+
+                # left overlay
+                if c > 0:
+                    for i in range(mask_overlay_width):
+                        feather_rate = (i + 1.0) / mask_overlay_width
+                        mask[:, :, i] *= feather_rate
+
+                # top overlay
+                if r > 0:
+                    for i in range(mask_overlay_height):
+                        feather_rate = (i + 1.0) / mask_overlay_height
+                        mask[:, i, :] *= feather_rate
+
+                # # right overlay
+                # if c + 1 < columns:
+                #     for i in range(mask_overlay_width):
+                #         feather_rate = (i + 1.0) / mask_overlay_width
+                #         mask[:, :, -i] *= feather_rate
+                # 
+                # # bottom overlay
+                # if r + 1 < rows:
+                #     for i in range(mask_overlay_height):
+                #         feather_rate = (i + 1.0) / mask_overlay_height
+                #         mask[:, -i, :] *= feather_rate
+
+                latent["noise_mask"] = mask.reshape((-1, 1, mask.shape[-2], mask.shape[-1]))
+
+                tiled_ksampler_params = {
+                    "latent": latent,
+                    "start_step": step,
+                    "last_step": step + steps_chunk,
+                    "disable_noise": True if step > 0 else False,
+                    "force_full_denoise": True if (step + steps_chunk) >= steps else False,
+                }
+
+                output_latent_tile = common_ksampler(**{**common_ksampler_params, **tiled_ksampler_params})[0]
+
+                output_latent["samples"] = composite(destination=output_latent["samples"], source=output_latent_tile["samples"], x=x, y=y, mask=mask, multiplier=1, resize_source=False)
+
+                if seamless_params is not None and step + 1 >= seamless_start_step and step + steps_chunk <= seamless_end_step:
+                    output_latent["samples"] = apply_seamless(output_latent["samples"], seamless_params["direction"], seamless_params["border_percent"])
+
+        return output_latent
 
     def resize(self, samples, width, height, method, crop, upscale_model=None, scale_by=0, samples_type="image", **kwargs):
         if scale_by > 0:
@@ -422,7 +587,8 @@ class JN_KSampler:
             return samples
 
         if upscale_model is not None and samples_type == "image":
-            samples = ImageUpscaleWithModel().upscale(upscale_model, samples.clone().movedim(1, -1))[0].movedim(-1, 1)
+            while width > samples.shape[3] or height > samples.shape[2]:
+                samples = ImageUpscaleWithModel().upscale(upscale_model, samples.clone().movedim(1, -1))[0].movedim(-1, 1)
 
             if width == samples.shape[3] and height == samples.shape[2]:
                 return samples
@@ -434,10 +600,10 @@ class JN_KSampler:
             (batch_size, channels, height, width) = tensor.shape
             if direction in ('both', 'horizontal'):
                 gap = min(round(width * border_percent), width // 4)
-                tensor = tensor[(:, :, :, gap:-gap)]
+                tensor = tensor[:, :, :, gap:-gap]
             if direction in ('both', 'vertical'):
                 gap = min(round(height * border_percent), height // 4)
-                tensor = tensor[(:, :, gap:-gap, :)]
+                tensor = tensor[:, :, gap:-gap, :]
             return tensor
 
         return crop(image.clone().movedim(-1, 1), direction, border_percent).movedim(1, -1)
@@ -446,21 +612,6 @@ class JN_KSampler:
         sigma_start = model.model.model_sampling.percent_to_sigma(start_percent)
         sigma_end = model.model.model_sampling.percent_to_sigma(end_percent)
         model_options = model.model_options
-
-        def apply_seamless(tensor, direction, border_percent):
-            (batch_size, channels, height, width) = tensor.shape
-
-            if direction in ('both', 'horizontal'):
-                gap = min(round(width * border_percent), width // 4)
-                tensor[(:, :, :, -gap:)] = tensor[(:, :, :, gap:gap * 2)]
-                tensor[(:, :, :, :gap)] = tensor[(:, :, :, -(gap * 2):-gap)]
-
-            if direction in ('both', 'vertical'):
-                gap = min(round(height * border_percent), height // 4)
-                tensor[(:, :, -gap:, :)] = tensor[(:, :, gap:gap * 2, :)]
-                tensor[(:, :, :gap, :)] = tensor[(:, :, -(gap * 2):-gap, :)]
-
-            return tensor
 
         def unet_wrapper_function(apply_model, options):
             input_x = options["input"]
