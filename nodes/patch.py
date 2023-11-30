@@ -27,21 +27,21 @@ class JN_SeamlessBorderCrop:
 
     def run(self, image, params):
         direction = params["direction"]
-        border = params["border"]
+        border_percent = params["border_percent"]
 
-        image = self.crop(image.clone().movedim(-1, 1), direction, border).movedim(1, -1)
+        image = self.crop(image.clone().movedim(-1, 1), direction, border_percent).movedim(1, -1)
 
         return (image,)
 
-    def crop(self, tensor, direction, border):
+    def crop(self, tensor, direction, border_percent):
         (batch_size, channels, height, width) = tensor.shape
 
         if direction in ["both", "horizontal"]:
-            gap = min(border, width // 2)
+            gap = min(round(width * border_percent), width // 4)
             tensor = tensor[:, :, :, gap:-gap]
 
         if direction in ["both", "vertical"]:
-            gap = min(border, height // 2)
+            gap = min(round(height * border_percent), height // 4)
             tensor = tensor[:, :, gap:-gap, :]
 
         return tensor
@@ -59,39 +59,35 @@ class JN_SeamlessBorder:
             "required": {
                 "model": ("MODEL",),
                 "direction": (s.DIRECTIONS,),
-                "border": ("INT", {"default": 32, "min": 8, "max": 0xffffffffffffffff, "step": 8}),
+                "border_percent": ("FLOAT", {"default": 0.125, "min": 0, "max": 0.25, "step": 0.001}),
                 "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.001}),
                 "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001})
             },
         }
 
-    def run(self, model, direction="both", border=32, start_percent=0.0, end_percent=1.0):
+    def run(self, model, direction="both", border_percent=0.125, start_percent=0.0, end_percent=1.0):
         params = {
             "direction": direction,
-            "border": border,
+            "border_percent": border_percent,
             "start_percent": start_percent,
             "end_percent": end_percent,
         }
-
-        border_latent = max(1, border // 8)
 
         sigma_start = model.model.model_sampling.percent_to_sigma(start_percent)
         sigma_end = model.model.model_sampling.percent_to_sigma(end_percent)
 
         model_options = model.model_options
 
-        def apply_seamless(tensor, direction, border):
+        def apply_seamless(tensor, direction, border_percent):
             (batch_size, channels, height, width) = tensor.shape
 
             if direction in ["both", "horizontal"]:
-                gap = min(border, width // 4)
-
+                gap = min(round(width * border_percent), width // 4)
                 tensor[:, :, :, -gap:] = tensor[:, :, :, gap:(gap * 2)]
                 tensor[:, :, :, :gap] = tensor[:, :, :, -(gap * 2):-gap]
 
             if direction in ["both", "vertical"]:
-                gap = min(border, height // 4)
-
+                gap = min(round(height * border_percent), height // 4)
                 tensor[:, :, -gap:, :] = tensor[:, :, gap:(gap * 2), :]
                 tensor[:, :, :gap, :] = tensor[:, :, -(gap * 2):-gap, :]
 
@@ -105,15 +101,15 @@ class JN_SeamlessBorder:
             sigma = timestep_[0].item()
 
             if sigma <= sigma_start and sigma >= sigma_end:
-                input_x = apply_seamless(input_x, direction, border_latent)
+                input_x = apply_seamless(input_x, direction, border_percent)
 
-            if 'model_function_wrapper' in model_options:
-                output = model_options['model_function_wrapper'](apply_model, options)
+            if "model_function_wrapper" in model_options:
+                output = model_options["model_function_wrapper"](apply_model, options)
             else:
                 output = apply_model(input_x, timestep_, **c)
 
             if sigma <= sigma_start and sigma >= sigma_end:
-                output = apply_seamless(output, direction, border_latent)
+                output = apply_seamless(output, direction, border_percent)
 
             return output
 

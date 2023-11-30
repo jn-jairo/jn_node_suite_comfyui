@@ -14,14 +14,14 @@ from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
 def apply_seamless(tensor, direction, border_percent):
     (batch_size, channels, height, width) = tensor.shape
 
-    if direction in ('both', 'horizontal'):
+    if direction in ["both", "horizontal"]:
         gap = min(round(width * border_percent), width // 4)
-        tensor[:, :, :, -gap:] = tensor[:, :, :, gap:gap * 2]
+        tensor[:, :, :, -gap:] = tensor[:, :, :, gap:(gap * 2)]
         tensor[:, :, :, :gap] = tensor[:, :, :, -(gap * 2):-gap]
 
-    if direction in ('both', 'vertical'):
+    if direction in ["both", "vertical"]:
         gap = min(round(height * border_percent), height // 4)
-        tensor[:, :, -gap:, :] = tensor[:, :, gap:gap * 2, :]
+        tensor[:, :, -gap:, :] = tensor[:, :, gap:(gap * 2), :]
         tensor[:, :, :gap, :] = tensor[:, :, -(gap * 2):-gap, :]
 
     return tensor
@@ -82,11 +82,11 @@ class JN_VAE:
         batch_number = int(free_memory / memory_used)
         batch_number = max(1, batch_number)
 
-        pixel_samples = torch.empty((samples_in.shape[0], 3, round(samples_in.shape[2] * 8), round(samples_in.shape[3] * 8)), 'cpu', **('device',))
+        pixel_samples = torch.empty((samples_in.shape[0], 3, round(samples_in.shape[2] * 8), round(samples_in.shape[3] * 8)), "cpu", **("device",))
 
         for x in range(0, samples_in.shape[0], batch_number):
             samples = samples_in[x:x + batch_number].to(self.vae_dtype).to(device)
-            pixel_samples[x:x + batch_number] = torch.clamp((self.first_stage_model.decode(samples).cpu().float() + 1) / 2, 0, 1, **('min', 'max'))
+            pixel_samples[x:x + batch_number] = torch.clamp((self.first_stage_model.decode(samples).cpu().float() + 1) / 2, 0, 1, **("min", "max"))
 
         return pixel_samples
 
@@ -136,7 +136,7 @@ class JN_VAE:
         batch_number = int(free_memory / memory_used)
         batch_number = max(1, batch_number)
 
-        samples = torch.empty((pixel_samples.shape[0], 4, round(pixel_samples.shape[2] // 8), round(pixel_samples.shape[3] // 8)), 'cpu', **('device',))
+        samples = torch.empty((pixel_samples.shape[0], 4, round(pixel_samples.shape[2] // 8), round(pixel_samples.shape[3] // 8)), "cpu", **("device",))
 
         for x in range(0, pixel_samples.shape[0], batch_number):
             pixels_in = (2 * pixel_samples[x:x + batch_number] - 1).to(self.vae_dtype).to(device)
@@ -146,16 +146,16 @@ class JN_VAE:
 
 class JN_VAEPatch:
     CATEGORY = CATEGORY_SAMPLING
-    RETURN_TYPES = ('VAE',)
-    FUNCTION = 'run'
+    RETURN_TYPES = ("VAE",)
+    FUNCTION = "run"
 
     @classmethod
     def INPUT_TYPES(s):
         return {
-            'required': {
-                'vae': ('VAE',),
-                'fallback_method': (['tile', 'cpu'],),
-                'tile_size': ('INT', {'default': 512, 'min': 64, 'max': 4096, 'step': 64}),
+            "required": {
+                "vae": ("VAE",),
+                "fallback_method": (["tile", "cpu"],),
+                "tile_size": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 64}),
             },
         }
 
@@ -165,173 +165,173 @@ class JN_VAEPatch:
 
 class JN_KSamplerAdvancedParams:
     CATEGORY = CATEGORY_SAMPLING
-    RETURN_TYPES = ('PARAMS',)
-    FUNCTION = 'run'
+    RETURN_TYPES = ("PARAMS",)
+    FUNCTION = "run"
 
     @classmethod
     def INPUT_TYPES(s):
         return {
-            'required': {
-                'add_noise': ('BOOLEAN', {'default': True}),
-                'return_with_leftover_noise': ('BOOLEAN', {'default': False}),
-                'start_at_step': ('INT', {'default': 0, 'min': 0, 'max': 10000}),
+            "required": {
+                "add_noise": ("BOOLEAN", {"default": True}),
+                "return_with_leftover_noise": ("BOOLEAN", {"default": False}),
+                "start_at_step": ("INT", {"default": 0, "min": 0, "max": 10000}),
             },
         }
 
     def run(self, add_noise=True, return_with_leftover_noise=False, start_at_step=0, end_at_step=10000, **kwargs):
         params = {
-            '__type__': 'JN_KSamplerAdvancedParams',
-            'add_noise': add_noise,
-            'return_with_leftover_noise': return_with_leftover_noise,
-            'start_at_step': start_at_step,
-            'end_at_step': end_at_step,
+            "__type__": "JN_KSamplerAdvancedParams",
+            "add_noise": add_noise,
+            "return_with_leftover_noise": return_with_leftover_noise,
+            "start_at_step": start_at_step,
+            "end_at_step": end_at_step,
         }
         return (params,)
 
 class JN_KSamplerSeamlessParams:
     CATEGORY = CATEGORY_SAMPLING
-    RETURN_TYPES = ('PARAMS',)
-    FUNCTION = 'run'
-    DIRECTIONS = ['both', 'horizontal', 'vertical']
+    RETURN_TYPES = ("PARAMS",)
+    FUNCTION = "run"
+    DIRECTIONS = ["both", "horizontal", "vertical"]
 
     @classmethod
     def INPUT_TYPES(s):
         return {
-            'required': {
-                'direction': (s.DIRECTIONS,),
-                'border_percent': ('FLOAT', {'default': 0.125, 'min': 0, 'max': 0.25, 'step': 0.001}),
-                'start_percent': ('FLOAT', {'default': 0, 'min': 0, 'max': 1, 'step': 0.001}),
-                'end_percent': ('FLOAT', {'default': 1, 'min': 0, 'max': 1, 'step': 0.001}),
+            "required": {
+                "direction": (s.DIRECTIONS,),
+                "border_percent": ("FLOAT", {"default": 0.125, "min": 0, "max": 0.25, "step": 0.001}),
+                "start_percent": ("FLOAT", {"default": 0, "min": 0, "max": 1, "step": 0.001}),
+                "end_percent": ("FLOAT", {"default": 1, "min": 0, "max": 1, "step": 0.001}),
             },
         }
 
     def run(self, direction="both", border_percent=0.125, start_percent=0, end_percent=1, **kwargs):
         params = {
-            '__type__': 'JN_KSamplerSeamlessParams',
-            'direction': direction,
-            'border_percent': border_percent,
-            'start_percent': start_percent,
-            'end_percent': end_percent,
+            "__type__": "JN_KSamplerSeamlessParams",
+            "direction": direction,
+            "border_percent": border_percent,
+            "start_percent": start_percent,
+            "end_percent": end_percent,
         }
         return (params,)
 
 class JN_KSamplerTileParams:
     CATEGORY = CATEGORY_SAMPLING
-    RETURN_TYPES = ('PARAMS',)
-    FUNCTION = 'run'
+    RETURN_TYPES = ("PARAMS",)
+    FUNCTION = "run"
 
     @classmethod
     def INPUT_TYPES(s):
         return {
-            'required': {
-                'width': ('INT', {'default': 0, 'min': 0, 'max': MAX_RESOLUTION, 'step': 8}),
-                'height': ('INT', {'default': 0, 'min': 0, 'max': MAX_RESOLUTION, 'step': 8}),
-                'overlay_percent': ('FLOAT', {'default': 0.5, 'min': 0, 'max': 1, 'step': 0.001}),
-                'steps_chunk': ('INT', {'default': 1, 'min': 1, 'max': 10000}),
+            "required": {
+                "width": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 8}),
+                "height": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 8}),
+                "overlay_percent": ("FLOAT", {"default": 0.5, "min": 0, "max": 1, "step": 0.001}),
+                "steps_chunk": ("INT", {"default": 0, "min": 0, "max": 10000}),
             },
         }
 
-    def run(self, width=0, height=0, overlay_percent=0.5, steps_chunk=1, **kwargs):
+    def run(self, width=0, height=0, overlay_percent=0.5, steps_chunk=0, **kwargs):
         params = {
-            '__type__': 'JN_KSamplerTileParams',
-            'width': width,
-            'height': height,
-            'overlay_percent': overlay_percent,
+            "__type__": "JN_KSamplerTileParams",
+            "width": width,
+            "height": height,
+            "overlay_percent": overlay_percent,
             "steps_chunk": steps_chunk,
         }
         return (params,)
 
 class JN_KSamplerResizeInputParams:
     CATEGORY = CATEGORY_SAMPLING
-    RETURN_TYPES = ('PARAMS',)
-    FUNCTION = 'run'
-    RESIZE_METHODS = ['nearest-exact', 'bilinear', 'area', 'bicubic', 'lanczos', 'bislerp']
-    CROP_METHODS = ['disabled', 'center']
+    RETURN_TYPES = ("PARAMS",)
+    FUNCTION = "run"
+    RESIZE_METHODS = ["nearest-exact", "bilinear", "area", "bicubic", "lanczos", "bislerp"]
+    CROP_METHODS = ["disabled", "center"]
 
     @classmethod
     def INPUT_TYPES(s):
         return {
-            'required': {
-                'method': (s.RESIZE_METHODS,),
-                'crop': (s.CROP_METHODS,),
+            "required": {
+                "method": (s.RESIZE_METHODS,),
+                "crop": (s.CROP_METHODS,),
             },
-            'optional': {
-                'upscale_model': ('UPSCALE_MODEL',),
+            "optional": {
+                "upscale_model": ("UPSCALE_MODEL",),
             },
         }
 
     def run(self, method="nearest-exact", crop="disabled", upscale_model=None, **kwargs):
         params = {
-            '__type__': 'JN_KSamplerResizeInputParams',
-            'method': method,
-            'crop': crop,
-            'upscale_model': upscale_model,
+            "__type__": "JN_KSamplerResizeInputParams",
+            "method": method,
+            "crop": crop,
+            "upscale_model": upscale_model,
         }
         return (params,)
 
 class JN_KSamplerResizeOutputParams:
     CATEGORY = CATEGORY_SAMPLING
-    RETURN_TYPES = ('PARAMS',)
-    FUNCTION = 'run'
-    RESIZE_METHODS = ['nearest-exact', 'bilinear', 'area', 'bicubic', 'lanczos', 'bislerp']
-    CROP_METHODS = ['disabled', 'center']
+    RETURN_TYPES = ("PARAMS",)
+    FUNCTION = "run"
+    RESIZE_METHODS = ["nearest-exact", "bilinear", "area", "bicubic", "lanczos", "bislerp"]
+    CROP_METHODS = ["disabled", "center"]
 
     @classmethod
     def INPUT_TYPES(s):
         return {
-            'required': {
-                'method': (s.RESIZE_METHODS,),
-                'crop': (s.CROP_METHODS,),
-                'width': ('INT', {'default': 0, 'min': 0, 'max': MAX_RESOLUTION, 'step': 8}),
-                'height': ('INT', {'default': 0, 'min': 0, 'max': MAX_RESOLUTION, 'step': 8}),
-                'scale_by': ('FLOAT', {'default': 0, 'min': 0, 'max': 8, 'step': 0.01}),
+            "required": {
+                "method": (s.RESIZE_METHODS,),
+                "crop": (s.CROP_METHODS,),
+                "width": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 8}),
+                "height": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 8}),
+                "scale_by": ("FLOAT", {"default": 0, "min": 0, "max": 8, "step": 0.01}),
             },
-            'optional': {
-                'upscale_model': ('UPSCALE_MODEL',),
+            "optional": {
+                "upscale_model": ("UPSCALE_MODEL",),
             },
     }
 
     def run(self, method="nearest-exact", crop="disabled", width=0, height=0, scale_by=0, upscale_model=None, **kwargs):
         params = {
-            '__type__': 'JN_KSamplerResizeOutputParams',
-            'method': method,
-            'crop': crop,
-            'width': width,
-            'height': height,
-            'scale_by': scale_by,
-            'upscale_model': upscale_model,
+            "__type__": "JN_KSamplerResizeOutputParams",
+            "method": method,
+            "crop": crop,
+            "width": width,
+            "height": height,
+            "scale_by": scale_by,
+            "upscale_model": upscale_model,
         }
         return (params,)
 
 class JN_KSampler:
     CATEGORY = CATEGORY_SAMPLING
-    RETURN_TYPES = ('LATENT', 'IMAGE', 'IMAGE', 'LATENT', 'IMAGE')
-    RETURN_NAMES = ('LATENT', 'IMAGE', 'FINAL_IMAGE', 'INPUT_LATENT', 'INPUT_IMAGE')
-    FUNCTION = 'sample'
+    RETURN_TYPES = ("LATENT", "IMAGE", "IMAGE", "LATENT", "IMAGE")
+    RETURN_NAMES = ("LATENT", "IMAGE", "FINAL_IMAGE", "INPUT_LATENT", "INPUT_IMAGE")
+    FUNCTION = "sample"
 
     @classmethod
     def INPUT_TYPES(s):
         return {
-            'required': {
-                'model': ('MODEL',),
-                'vae': ('VAE',),
-                'seed': ('INT', {'default': 0, 'min': 0, 'max': 0xffffffffffffffff}),
-                'steps': ('INT', {'default': 20, 'min': 1, 'max': 10000}),
-                'cfg': ('FLOAT', {'default': 8, 'min': 0, 'max': 100, 'step': 0.1, 'round': 0.01}),
-                'sampler_name': (comfy.samplers.KSampler.SAMPLERS,),
-                'scheduler': (comfy.samplers.KSampler.SCHEDULERS,),
-                'positive': ('CONDITIONING',),
-                'negative': ('CONDITIONING',),
-                'denoise': ('FLOAT', {'default': 1, 'min': 0, 'max': 1, 'step': 0.01}),
-                'decode_image': ('BOOLEAN', {'default': True}),
+            "required": {
+                "model": ("MODEL",),
+                "vae": ("VAE",),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
+                "cfg": ("FLOAT", {"default": 8, "min": 0, "max": 100, "step": 0.1, "round": 0.01}),
+                "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
+                "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
+                "positive": ("CONDITIONING",),
+                "negative": ("CONDITIONING",),
+                "denoise": ("FLOAT", {"default": 1, "min": 0, "max": 1, "step": 0.01}),
+                "decode_image": ("BOOLEAN", {"default": True}),
             },
-            'optional': {
-                'latent_image': ('LATENT',),
-                'image': ('IMAGE',),
-                'width': ('INT', {'default': 512, 'min': 0, 'max': MAX_RESOLUTION, 'step': 8}),
-                'height': ('INT', {'default': 512, 'min': 0, 'max': MAX_RESOLUTION, 'step': 8}),
-                'batch_size': ('INT', {'default': 1, 'min': 1, 'max': 4096}),
-                'params': ('*', {'multiple': True}),
+            "optional": {
+                "latent_image": ("LATENT",),
+                "image": ("IMAGE",),
+                "width": ("INT", {"default": 512, "min": 0, "max": MAX_RESOLUTION, "step": 8}),
+                "height": ("INT", {"default": 512, "min": 0, "max": MAX_RESOLUTION, "step": 8}),
+                "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096}),
+                "params": ("*", {"multiple": True}),
             },
         }
 
@@ -346,13 +346,13 @@ class JN_KSampler:
         params = [param for param in params if param is not None]
         options = {param["__type__"]: param for param in params if "__type__" in param}
 
-        advanced_params = options['JN_KSamplerAdvancedParams'] if 'JN_KSamplerAdvancedParams' in options else None
-        seamless_params = options['JN_KSamplerSeamlessParams'] if 'JN_KSamplerSeamlessParams' in options else None
-        tile_params = options['JN_KSamplerTileParams'] if 'JN_KSamplerTileParams' in options else None
-        resize_input_params = options['JN_KSamplerResizeInputParams'] if 'JN_KSamplerResizeInputParams' in options else None
-        resize_output_params = options['JN_KSamplerResizeOutputParams'] if 'JN_KSamplerResizeOutputParams' in options else None
+        advanced_params = options["JN_KSamplerAdvancedParams"] if "JN_KSamplerAdvancedParams" in options else None
+        seamless_params = options["JN_KSamplerSeamlessParams"] if "JN_KSamplerSeamlessParams" in options else None
+        tile_params = options["JN_KSamplerTileParams"] if "JN_KSamplerTileParams" in options else None
+        resize_input_params = options["JN_KSamplerResizeInputParams"] if "JN_KSamplerResizeInputParams" in options else None
+        resize_output_params = options["JN_KSamplerResizeOutputParams"] if "JN_KSamplerResizeOutputParams" in options else None
 
-        if tile_params and tile_params['width'] == 0 and tile_params['height'] == 0:
+        if tile_params and tile_params["width"] == 0 and tile_params["height"] == 0:
             tile_params = None
 
         if image is not None and resize_input_params is not None:
@@ -420,10 +420,10 @@ class JN_KSampler:
 
         return (output_latent, output_image, final_image, latent_image, image)
 
-    def tiled_ksampler(self, width, height, overlay_percent, steps_chunk=1, common_ksampler_params=None, seamless_params=None, **kwargs):
-        latent_image = common_ksampler_params['latent']
-        latent_width = latent_image['samples'].shape[3]
-        latent_height = latent_image['samples'].shape[2]
+    def tiled_ksampler(self, width, height, overlay_percent, steps_chunk=0, common_ksampler_params=None, seamless_params=None, **kwargs):
+        latent_image = common_ksampler_params["latent"]
+        latent_width = latent_image["samples"].shape[3]
+        latent_height = latent_image["samples"].shape[2]
 
         width = width // 8
         height = height // 8
@@ -504,6 +504,9 @@ class JN_KSampler:
         output_latent["samples"] = latent_image["samples"].clone()
 
         steps = common_ksampler_params["steps"]
+
+        if steps_chunk <= 0:
+            steps_chunk = steps
 
         if seamless_params is not None:
             seamless_start_step = steps * seamless_params["start_percent"]
@@ -598,12 +601,15 @@ class JN_KSampler:
     def seamless_crop(self, image, direction, border_percent, **kwargs):
         def crop(tensor, direction, border_percent):
             (batch_size, channels, height, width) = tensor.shape
-            if direction in ('both', 'horizontal'):
+
+            if direction in ["both", "horizontal"]:
                 gap = min(round(width * border_percent), width // 4)
                 tensor = tensor[:, :, :, gap:-gap]
-            if direction in ('both', 'vertical'):
+
+            if direction in ["both", "vertical"]:
                 gap = min(round(height * border_percent), height // 4)
                 tensor = tensor[:, :, gap:-gap, :]
+
             return tensor
 
         return crop(image.clone().movedim(-1, 1), direction, border_percent).movedim(1, -1)
@@ -623,8 +629,8 @@ class JN_KSampler:
             if sigma <= sigma_start and sigma >= sigma_end:
                 input_x = apply_seamless(input_x, direction, border_percent)
 
-            if 'model_function_wrapper' in model_options:
-                output = model_options['model_function_wrapper'](apply_model, options)
+            if "model_function_wrapper" in model_options:
+                output = model_options["model_function_wrapper"](apply_model, options)
             else:
                 output = apply_model(input_x, timestep_, **c)
 
@@ -648,21 +654,21 @@ class JN_KSampler:
         return pixels
 
 NODE_CLASS_MAPPINGS = {
-    'JN_KSampler': JN_KSampler,
-    'JN_KSamplerAdvancedParams': JN_KSamplerAdvancedParams,
-    'JN_KSamplerResizeInputParams': JN_KSamplerResizeInputParams,
-    'JN_KSamplerResizeOutputParams': JN_KSamplerResizeOutputParams,
-    'JN_KSamplerSeamlessParams': JN_KSamplerSeamlessParams,
-    'JN_KSamplerTileParams': JN_KSamplerTileParams,
-    'JN_VAEPatch': JN_VAEPatch,
+    "JN_KSampler": JN_KSampler,
+    "JN_KSamplerAdvancedParams": JN_KSamplerAdvancedParams,
+    "JN_KSamplerResizeInputParams": JN_KSamplerResizeInputParams,
+    "JN_KSamplerResizeOutputParams": JN_KSamplerResizeOutputParams,
+    "JN_KSamplerSeamlessParams": JN_KSamplerSeamlessParams,
+    "JN_KSamplerTileParams": JN_KSamplerTileParams,
+    "JN_VAEPatch": JN_VAEPatch,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    'JN_KSampler': 'KSampler',
-    'JN_KSamplerAdvancedParams': 'KSampler Advanced Params',
-    'JN_KSamplerResizeInputParams': 'KSampler Resize Input Params',
-    'JN_KSamplerResizeOutputParams': 'KSampler Resize Output Params',
-    'JN_KSamplerSeamlessParams': 'KSampler Seamless Params',
-    'JN_KSamplerTileParams': 'KSampler Tile Params',
-    'JN_VAEPatch': 'VAE Patch',
+    "JN_KSampler": "KSampler",
+    "JN_KSamplerAdvancedParams": "KSampler Advanced Params",
+    "JN_KSamplerResizeInputParams": "KSampler Resize Input Params",
+    "JN_KSamplerResizeOutputParams": "KSampler Resize Output Params",
+    "JN_KSamplerSeamlessParams": "KSampler Seamless Params",
+    "JN_KSamplerTileParams": "KSampler Tile Params",
+    "JN_VAEPatch": "VAE Patch",
 }
