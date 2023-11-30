@@ -14,7 +14,7 @@ import folder_paths
 import comfy
 from comfy_extras.nodes_mask import composite
 
-from ..utils import CATEGORY_IMAGE
+from ..utils import CATEGORY_IMAGE, DIRECTIONS
 
 def resize_background(image, width, height, upscale_method="bilinear", crop="center"):
     samples = image.movedim(-1,1)
@@ -349,14 +349,12 @@ class JN_ImageCenterArea:
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "run"
 
-    DIRECTIONS = ["both", "horizontal", "vertical", "none"]
-
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
                 "image": ("IMAGE",),
-                "direction": (s.DIRECTIONS,),
+                "direction": (DIRECTIONS,),
             },
             "optional": {
                 "areas": ("*", {"multiple": True}),

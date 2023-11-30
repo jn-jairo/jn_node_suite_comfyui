@@ -2,7 +2,7 @@ from functools import reduce
 import torch
 import math
 
-from ..utils import CATEGORY_SAMPLING
+from ..utils import CATEGORY_SAMPLING, DIRECTIONS
 
 import comfy
 from comfy import model_management
@@ -10,6 +10,8 @@ from nodes import common_ksampler, MAX_RESOLUTION, VAEEncode, VAEDecode, EmptyLa
 from comfy_extras.nodes_mask import composite
 from comfy.sd import VAE
 from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
+from .facerestore import FACEDETECTION_MODELS, JN_FaceRestoreWithModel
+from .image import JN_ImageCenterArea
 
 def apply_seamless(tensor, direction, border_percent):
     (batch_size, channels, height, width) = tensor.shape
@@ -192,13 +194,12 @@ class JN_KSamplerSeamlessParams:
     CATEGORY = CATEGORY_SAMPLING
     RETURN_TYPES = ("PARAMS",)
     FUNCTION = "run"
-    DIRECTIONS = ["both", "horizontal", "vertical"]
 
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "direction": (s.DIRECTIONS,),
+                "direction": (DIRECTIONS,),
                 "border_percent": ("FLOAT", {"default": 0.125, "min": 0, "max": 0.25, "step": 0.001}),
                 "start_percent": ("FLOAT", {"default": 0, "min": 0, "max": 1, "step": 0.001}),
                 "end_percent": ("FLOAT", {"default": 1, "min": 0, "max": 1, "step": 0.001}),
@@ -254,17 +255,23 @@ class JN_KSamplerResizeInputParams:
             "required": {
                 "method": (s.RESIZE_METHODS,),
                 "crop": (s.CROP_METHODS,),
+                "width": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 8}),
+                "height": ("INT", {"default": 0, "min": 0, "max": MAX_RESOLUTION, "step": 8}),
+                "scale_by": ("FLOAT", {"default": 0, "min": 0, "max": 8, "step": 0.01}),
             },
             "optional": {
                 "upscale_model": ("UPSCALE_MODEL",),
             },
         }
 
-    def run(self, method="nearest-exact", crop="disabled", upscale_model=None, **kwargs):
+    def run(self, method="nearest-exact", crop="disabled", width=0, height=0, scale_by=0, upscale_model=None, **kwargs):
         params = {
             "__type__": "JN_KSamplerResizeInputParams",
             "method": method,
             "crop": crop,
+            "width": width,
+            "height": height,
+            "scale_by": scale_by,
             "upscale_model": upscale_model,
         }
         return (params,)
@@ -300,6 +307,32 @@ class JN_KSamplerResizeOutputParams:
             "height": height,
             "scale_by": scale_by,
             "upscale_model": upscale_model,
+        }
+        return (params,)
+
+class JN_KSamplerFaceRestoreParams:
+    CATEGORY = CATEGORY_SAMPLING
+    RETURN_TYPES = ("PARAMS",)
+    FUNCTION = "run"
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "facerestore_model": ("FACERESTORE_MODEL",),
+                "facedetection": (FACEDETECTION_MODELS,),
+                "center_direction": (DIRECTIONS,),
+                "strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1, "step": 0.05}),
+            },
+    }
+
+    def run(self, facerestore_model=None, facedetection="retinaface_resnet50", center_direction="none", strength=0.5, **kwargs):
+        params = {
+            "__type__": "JN_KSamplerFaceRestoreParams",
+            "facerestore_model": facerestore_model,
+            "facedetection": facedetection,
+            "center_direction": center_direction,
+            "strength": strength,
         }
         return (params,)
 
@@ -351,9 +384,17 @@ class JN_KSampler:
         tile_params = options["JN_KSamplerTileParams"] if "JN_KSamplerTileParams" in options else None
         resize_input_params = options["JN_KSamplerResizeInputParams"] if "JN_KSamplerResizeInputParams" in options else None
         resize_output_params = options["JN_KSamplerResizeOutputParams"] if "JN_KSamplerResizeOutputParams" in options else None
+        face_restore_params = options["JN_KSamplerFaceRestoreParams"] if "JN_KSamplerFaceRestoreParams" in options else None
 
         if tile_params and tile_params["width"] == 0 and tile_params["height"] == 0:
             tile_params = None
+
+        if seamless_params and seamless_params["direction"] == "none":
+            seamless_params = None
+
+        if resize_input_params and resize_input_params["width"] == 0 and resize_input_params["height"] == 0 and resize_input_params["scale_by"] == 0:
+            resize_input_params["width"] = width
+            resize_input_params["height"] = height
 
         if image is not None and resize_input_params is not None:
             image = self.resize(image.clone().movedim(-1, 1), **resize_input_params).movedim(1, -1)
@@ -361,6 +402,7 @@ class JN_KSampler:
         if latent_image is None:
             if image is not None:
                 latent_image = VAEEncode().encode(vae=vae, pixels=image.clone())[0]
+                resize_input_params = None
             else:
                 latent_image = EmptyLatentImage().generate(width=width, height=height, batch_size=batch_size)[0]
 
@@ -414,6 +456,9 @@ class JN_KSampler:
 
             if seamless_params is not None:
                 final_image = self.seamless_crop(final_image, **seamless_params)
+
+            if face_restore_params is not None:
+                final_image = self.facerestore(final_image, **face_restore_params)
 
         if resize_output_params is not None:
             output_latent["samples"] = self.resize(output_latent["samples"], samples_type="latent", **resize_output_params)
@@ -578,6 +623,10 @@ class JN_KSampler:
         return output_latent
 
     def resize(self, samples, width, height, method, crop, upscale_model=None, scale_by=0, samples_type="image", **kwargs):
+        if samples_type == "latent":
+            width = width // 8
+            height = height // 8
+
         if scale_by > 0:
             width = round(samples.shape[3] * scale_by)
             height = round(samples.shape[2] * scale_by)
@@ -597,6 +646,17 @@ class JN_KSampler:
                 return samples
 
         return comfy.utils.common_upscale(samples, width, height, method, crop)
+
+    def facerestore(self, image, facerestore_model, facedetection, center_direction, strength, **kwargs):
+        outputs = JN_FaceRestoreWithModel().restore_face(image=image, facerestore_model=facerestore_model, facedetection=facedetection, strength=strength)
+
+        restored_image = outputs[0]
+
+        if center_direction != "none":
+            faces_areas = outputs[3]
+            restored_image = JN_ImageCenterArea().run(image=restored_image, direction=center_direction, areas=faces_areas)[0]
+
+        return restored_image
 
     def seamless_crop(self, image, direction, border_percent, **kwargs):
         def crop(tensor, direction, border_percent):
@@ -660,6 +720,7 @@ NODE_CLASS_MAPPINGS = {
     "JN_KSamplerResizeOutputParams": JN_KSamplerResizeOutputParams,
     "JN_KSamplerSeamlessParams": JN_KSamplerSeamlessParams,
     "JN_KSamplerTileParams": JN_KSamplerTileParams,
+    "JN_KSamplerFaceRestoreParams": JN_KSamplerFaceRestoreParams,
     "JN_VAEPatch": JN_VAEPatch,
 }
 
@@ -670,5 +731,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "JN_KSamplerResizeOutputParams": "KSampler Resize Output Params",
     "JN_KSamplerSeamlessParams": "KSampler Seamless Params",
     "JN_KSamplerTileParams": "KSampler Tile Params",
+    "JN_KSamplerFaceRestoreParams": "KSampler Face Restore Params",
     "JN_VAEPatch": "VAE Patch",
 }

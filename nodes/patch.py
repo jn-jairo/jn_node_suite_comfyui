@@ -1,7 +1,7 @@
 import torch
 from typing import Optional
 
-from ..utils import CATEGORY_PATCH
+from ..utils import CATEGORY_PATCH, DIRECTIONS
 from ..log import logger
 
 def _flatten(el):
@@ -51,14 +51,12 @@ class JN_SeamlessBorder:
     RETURN_TYPES = ("MODEL", "SEAMLESS_PARAMS")
     FUNCTION = "run"
 
-    DIRECTIONS = ["both", "horizontal", "vertical", "none"]
-
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
                 "model": ("MODEL",),
-                "direction": (s.DIRECTIONS,),
+                "direction": (DIRECTIONS,),
                 "border_percent": ("FLOAT", {"default": 0.125, "min": 0, "max": 0.25, "step": 0.001}),
                 "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.001}),
                 "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001})
@@ -124,8 +122,6 @@ class JN_Seamless:
     RETURN_NAMES = ("MODEL", "VAE", "flow")
     FUNCTION = "run"
 
-    DIRECTIONS = ["both", "horizontal", "vertical", "none"]
-
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -136,7 +132,7 @@ class JN_Seamless:
                 "dependency": ("*", {"multiple": True}),
             },
             "required": {
-                "direction": (s.DIRECTIONS,),
+                "direction": (DIRECTIONS,),
                 "min_channels": ("INT", {"default": 0, "min": 0, "max": 100000}),
                 "max_channels": ("INT", {"default": 100000, "min": 0, "max": 100000}),
             },
