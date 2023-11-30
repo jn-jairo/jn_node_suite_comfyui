@@ -379,6 +379,12 @@ class JN_KSampler:
         params = [param for param in params if param is not None]
         options = {param["__type__"]: param for param in params if "__type__" in param}
 
+        options_order = []
+        options_order_ = [param["__type__"] for param in params if "__type__" in param]
+        for option_order in options_order_:
+            if option_order not in options_order:
+                options_order.append(option_order)
+
         advanced_params = options["JN_KSamplerAdvancedParams"] if "JN_KSamplerAdvancedParams" in options else None
         seamless_params = options["JN_KSamplerSeamlessParams"] if "JN_KSamplerSeamlessParams" in options else None
         tile_params = options["JN_KSamplerTileParams"] if "JN_KSamplerTileParams" in options else None
@@ -451,14 +457,15 @@ class JN_KSampler:
         if decode_image:
             final_image = output_image = VAEDecode().decode(vae=vae, samples=output_latent)[0]
 
-            if resize_output_params is not None:
-                final_image = output_image = self.resize(output_image.clone().movedim(-1, 1), **resize_output_params).movedim(1, -1)
+            for option_order in options_order:
+                if option_order == "JN_KSamplerResizeOutputParams" and resize_output_params is not None:
+                    final_image = self.resize(final_image.clone().movedim(-1, 1), **resize_output_params).movedim(1, -1)
 
-            if seamless_params is not None:
-                final_image = self.seamless_crop(final_image, **seamless_params)
+                if option_order == "JN_KSamplerSeamlessParams" and seamless_params is not None:
+                    final_image = self.seamless_crop(final_image, **seamless_params)
 
-            if face_restore_params is not None:
-                final_image = self.facerestore(final_image, **face_restore_params)
+                if option_order == "JN_KSamplerFaceRestoreParams" and face_restore_params is not None:
+                    final_image = self.facerestore(final_image, **face_restore_params)
 
         if resize_output_params is not None:
             output_latent["samples"] = self.resize(output_latent["samples"], samples_type="latent", **resize_output_params)
