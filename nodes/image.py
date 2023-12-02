@@ -3,6 +3,7 @@ import os
 import re
 import glob
 import torch
+import torch.nn.functional as F
 import numpy as np
 from PIL import Image, ImageOps
 import math
@@ -241,6 +242,37 @@ class JN_ImageInfo:
         shape = list(image.shape)
         return (width, height, channels, batches, shape)
 
+class JN_ImageSharpness:
+    CATEGORY = CATEGORY_IMAGE
+    RETURN_TYPES = ("FLOAT", "ARRAY")
+    FUNCTION = "run"
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+            },
+        }
+
+    def run(self, images):
+        sharpness_array = []
+
+        for image in images:
+            i = 255. * image.cpu().numpy()
+            img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8)).convert("L")
+            array = np.asarray(img, dtype=np.int32)
+
+            gy, gx = np.gradient(array)
+            gnorm = np.sqrt(gx**2 + gy**2)
+            sharpness = np.average(gnorm)
+
+            sharpness_array.append(sharpness)
+
+        sharpness_average = np.average(sharpness_array)
+
+        return (sharpness_average, sharpness_array)
+
 class JN_MaskInfo:
     CATEGORY = CATEGORY_IMAGE
     RETURN_TYPES = ("INT", "INT", "INT", "ARRAY")
@@ -280,6 +312,86 @@ class JN_ImageAddMask:
         mask = mask.clone().reshape((-1, 1, mask.shape[-2], mask.shape[-1])).movedim(1, -1)
         image_masked = torch.cat((image, mask), dim=3)
         return (image_masked,)
+
+class JN_ImageSquare:
+    CATEGORY = CATEGORY_IMAGE
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "run"
+
+    METHODS = ["crop", "pad"]
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "method": (s.METHODS,),
+            },
+        }
+
+    def run(self, image, method="crop"):
+        image = image.clone().movedim(-1,1)
+        (batch_size, channels, height, width) = image.shape
+
+        if method == "pad":
+            target_length = max(height, width)
+            pad_l = (target_length - width) // 2
+            pad_r = (target_length - width) - pad_l
+            pad_t = (target_length - height) // 2
+            pad_b = (target_length - height) - pad_t
+            output = F.pad(image, (pad_l, pad_r, pad_t, pad_b), value=0, mode="constant")
+        else:
+            side = min(height, width)
+            half_side = math.ceil(side / 2)
+
+            tiles_horizontal = math.ceil(width / side)
+            tiles_vertical = math.ceil(height / side)
+
+            diff_width = (side * tiles_horizontal) - width
+            diff_height = (side * tiles_vertical) - height
+
+            diff_width_tile = math.ceil(diff_width / max(1, tiles_horizontal - 1))
+            diff_height_tile = math.ceil(diff_height / max(1, tiles_vertical - 1))
+
+            total_tiles = (tiles_horizontal + tiles_horizontal - 1) * (tiles_vertical + tiles_vertical - 1)
+            total_tiles_batch = total_tiles * batch_size
+
+            output = torch.zeros((total_tiles_batch, channels, side, side))
+
+            b = 0
+            for batch in range(batch_size):
+                y = 0
+                for row in range(0, tiles_vertical):
+                    x = 0
+                    for column in range(0, tiles_horizontal):
+                        i = column + (row * tiles_horizontal)
+
+                        if x + side > width:
+                            x = width - side
+
+                        if y + side > height:
+                            y = height - side
+
+
+                        if tiles_horizontal > 1 and column > 0:
+                            nx = x - ((side - diff_width_tile) // 2)
+                            output[b] = image[batch, :, y:y+side, nx:nx+side].clone()
+                            b += 1
+
+                        if tiles_vertical > 1 and row > 0:
+                            ny = y - ((side - diff_height_tile) // 2)
+                            output[b] = image[batch, :, ny:ny+side, x:x+side].clone()
+                            b += 1
+
+                        output[b] = image[batch, :, y:y+side, x:x+side].clone()
+                        b += 1
+
+                        x += side - diff_width_tile
+                    y += side - diff_height_tile
+
+        output = output.movedim(1,-1)
+
+        return (output,)
 
 class JN_ImageCrop:
     CATEGORY = CATEGORY_IMAGE
@@ -818,8 +930,10 @@ class JN_RemoveBackground:
 
 NODE_CLASS_MAPPINGS = {
     "JN_ImageInfo": JN_ImageInfo,
+    "JN_ImageSharpness": JN_ImageSharpness,
     "JN_MaskInfo": JN_MaskInfo,
     "JN_ImageAddMask": JN_ImageAddMask,
+    "JN_ImageSquare": JN_ImageSquare,
     "JN_ImageCrop": JN_ImageCrop,
     "JN_ImageUncrop": JN_ImageUncrop,
     "JN_ImageCenterArea": JN_ImageCenterArea,
@@ -837,8 +951,10 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "JN_ImageInfo": "Image Info",
+    "JN_ImageSharpness": "Image Sharpness",
     "JN_MaskInfo": "Mask Info",
     "JN_ImageAddMask": "Image Add Mask",
+    "JN_ImageSquare": "Image Square",
     "JN_ImageCrop": "Image Crop",
     "JN_ImageUncrop": "Image Uncrop",
     "JN_ImageCenterArea": "Image Center Area",

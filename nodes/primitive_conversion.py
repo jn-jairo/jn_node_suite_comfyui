@@ -16,11 +16,16 @@ def convert_constants(value):
 def to_boolean(value):
     if isinstance(value, str):
         value = value.lower() == "true"
+    elif isinstance(value, (int, float, bool)):
+        if math.isnan(value):
+            value = False
+        else:
+            try:
+                value = bool(value)
+            except:
+                value = None
     else:
-        try:
-            value = bool(value)
-        except:
-            value = None
+        value = value is not None
 
     return value
 
