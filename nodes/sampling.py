@@ -6,6 +6,7 @@ from ..utils import CATEGORY_SAMPLING, DIRECTIONS
 
 import comfy
 from comfy import model_management
+from comfy.utils import wait_cooldown
 from nodes import common_ksampler, MAX_RESOLUTION, VAEEncode, VAEDecode, EmptyLatentImage
 from comfy_extras.nodes_mask import composite
 from comfy.sd import VAE
@@ -443,6 +444,8 @@ class JN_KSampler:
             "force_full_denoise": force_full_denoise,
         }
 
+        wait_cooldown(kind="execution")
+
         if tile_params is not None:
             output_latent = self.tiled_ksampler(**tile_params, common_ksampler_params=common_ksampler_params, seamless_params=seamless_params)
         else:
@@ -455,16 +458,20 @@ class JN_KSampler:
         final_image = None
 
         if decode_image:
+            wait_cooldown(kind="execution")
             final_image = output_image = VAEDecode().decode(vae=vae, samples=output_latent)[0]
 
             for option_order in options_order:
                 if option_order == "JN_KSamplerResizeOutputParams" and resize_output_params is not None:
+                    wait_cooldown(kind="execution")
                     final_image = self.resize(final_image.clone().movedim(-1, 1), **resize_output_params).movedim(1, -1)
 
                 if option_order == "JN_KSamplerSeamlessParams" and seamless_params is not None:
+                    wait_cooldown(kind="execution")
                     final_image = self.seamless_crop(final_image, **seamless_params)
 
                 if option_order == "JN_KSamplerFaceRestoreParams" and face_restore_params is not None:
+                    wait_cooldown(kind="execution")
                     final_image = self.facerestore(final_image, **face_restore_params)
 
         if resize_output_params is not None:
@@ -568,6 +575,8 @@ class JN_KSampler:
             seamless_end_step = steps
 
         for step in range(0, steps, steps_chunk):
+            wait_cooldown(kind="progress")
+
             for tile in tiles:
                 c = tile["column"]
                 r = tile["row"]
