@@ -8,7 +8,7 @@ from ..utils import CATEGORY_SAMPLING, DIRECTIONS
 import comfy
 from comfy import model_management
 from comfy.utils import wait_cooldown
-from nodes import common_ksampler, MAX_RESOLUTION, VAEEncode, VAEDecode, EmptyLatentImage, VAEEncodeForInpaint, SetLatentNoiseMask
+from nodes import common_ksampler, MAX_RESOLUTION, VAEEncode, VAEDecode, EmptyLatentImage, InpaintModelConditioning, SetLatentNoiseMask
 from comfy_extras.nodes_mask import composite
 from comfy.sd import VAE
 from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
@@ -454,11 +454,10 @@ class JN_KSampler:
             mask_pad = int(mask_border_percent * min(mask_area["x2"] - mask_area["x1"], mask_area["y2"] - mask_area["y1"]))
             mask_area = normalize_area(mask_area, pad=mask_pad, multiple_of=8)
 
-            image_crop_result = JN_ImageCrop().run(image=image, mask=mask, area=mask_area)
+            (cropped_image, cropped_mask, mask_area, *_) = JN_ImageCrop().run(image=image, mask=mask, area=mask_area)
 
-            image = cropped_image = image_crop_result[0]
-            mask = cropped_mask = image_crop_result[1]
-            mask_area = image_crop_result[2]
+            image = cropped_image
+            mask = cropped_mask
 
             cropped_image_width = cropped_mask.shape[-1]
             cropped_image_height = cropped_mask.shape[-2]
@@ -472,7 +471,7 @@ class JN_KSampler:
         if latent_image is None:
             if image is not None:
                 if model.model.inpaint_model:
-                    latent_image = VAEEncodeForInpaint().encode(vae=vae, pixels=image.clone(), mask=mask.clone(), grow_mask_by=0)[0]
+                    (positive, negative, latent_image, *_) = InpaintModelConditioning().encode(positive=positive, negative=negative, vae=vae, pixels=image.clone(), mask=mask.clone())
                     mask_applied = True
                 else:
                     latent_image = VAEEncode().encode(vae=vae, pixels=image.clone())[0]
