@@ -5,3 +5,5 @@ psutil
 rembg
 torch
 torchvision
+spandrel
+spandrel_extra_arches

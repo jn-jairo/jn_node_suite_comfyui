@@ -17,6 +17,7 @@ import comfy.utils
 import numpy as np
 import cv2
 import math
+import sys
 from .facelib.utils.face_restoration_helper import FaceRestoreHelper
 from .facelib.detection.retinaface import retinaface
 from torchvision.transforms.functional import normalize
@@ -183,7 +184,8 @@ class JN_FaceRestoreWithModel:
                 try:
                     with torch.no_grad():
                         #output = facerestore_model(cropped_face_t, w=strength, adain=True)[0]
-                        output = facerestore_model(cropped_face_t, weight=strength)[0]
+                        # output = facerestore_model(cropped_face_t, weight=strength)[0]
+                        output = facerestore_model.model.forward(cropped_face_t, weight=strength)[0]
                         restored_face = tensor2img(output, rgb2bgr=True, min_max=(-1, 1))
                     del output
                     torch.cuda.empty_cache()

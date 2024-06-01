@@ -5,6 +5,14 @@ from .log import logger
 
 MODULE_PATH = os.path.dirname(os.path.abspath(__file__))
 
+try:
+    from spandrel_extra_arches import EXTRA_REGISTRY
+    from spandrel import MAIN_REGISTRY
+    MAIN_REGISTRY.add(*EXTRA_REGISTRY)
+    logger.info("Successfully imported spandrel_extra_arches: support for non commercial models.")
+except:
+    pass
+
 def load_nodes():
     error_messages = []
     node_class_mappings = {}
