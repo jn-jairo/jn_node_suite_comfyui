@@ -421,6 +421,12 @@ class JN_KSampler:
         if mask is not None and grow_mask_by > 0:
             mask = grow_mask(mask, grow_mask_by)
 
+        if mask is not None:
+            mask_area = get_crop_region(mask, multiple_of=8)
+
+            if mask_area["x2"] - mask_area["x1"] <= 0 or mask_area["y2"] - mask_area["y1"] <= 0:
+                mask = None
+
         input_image = image
         input_mask = mask
 
@@ -470,7 +476,7 @@ class JN_KSampler:
 
         if latent_image is None:
             if image is not None:
-                if model.model.inpaint_model:
+                if len(model.model.concat_keys) > 0 and mask is not None:
                     (positive, negative, latent_image, *_) = InpaintModelConditioning().encode(positive=positive, negative=negative, vae=vae, pixels=image.clone(), mask=mask.clone())
                     mask_applied = True
                 else:

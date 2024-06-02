@@ -104,12 +104,22 @@ def get_crop_region(mask, pad=0, multiple_of=1):
 
     multiple_of = max(1, multiple_of)
 
-    return {
+    mask_area = {
         "x1": int(max(round((crop_left-pad) / multiple_of) * multiple_of, 0)),
         "y1": int(max(round((crop_top-pad) / multiple_of) * multiple_of, 0)),
         "x2": int(min(round((w - crop_right + pad) / multiple_of) * multiple_of, w)),
         "y2": int(min(round((h - crop_bottom + pad) / multiple_of) * multiple_of, h)),
     }
+
+    if mask_area["x1"] >= mask_area["x2"] or mask_area["y1"] >= mask_area["y2"]:
+        mask_area = {
+            "x1": 0,
+            "y1": 0,
+            "x2": 0,
+            "y2": 0,
+        }
+
+    return mask_area
 
 class JN_AreaNormalize:
     CATEGORY = CATEGORY_IMAGE
