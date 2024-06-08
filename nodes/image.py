@@ -421,7 +421,7 @@ class JN_ImageCrop:
             },
         }
 
-    def run(self, image, mask=None, area=None, pad=0):
+    def run(self, image, area=None, mask=None, pad=0):
         image = image.clone().movedim(-1,1)
         if mask is not None:
             mask = mask.clone().reshape((-1, mask.shape[-2], mask.shape[-1]))
@@ -453,17 +453,24 @@ class JN_ImageUncrop:
             "required": {
                 "destination": ("IMAGE",),
                 "source": ("IMAGE",),
-                "area": ("AREA",),
                 "resize_source": ("BOOLEAN", {"default": False}),
             },
             "optional": {
+                "area": ("AREA",),
                 "mask": ("MASK",),
             }
         }
 
-    def run(self, destination, source, area, resize_source, mask=None):
+    def run(self, destination, source, resize_source, area=None, mask=None):
+        x = 0
+        y = 0
+        if area is not None:
+            x = area["x1"]
+            y = area["y1"]
+
         destination = destination.clone().movedim(-1, 1)
-        output = composite(destination, source.movedim(-1, 1), area["x1"], area["y1"], mask, 1, resize_source).movedim(1, -1)
+        output = composite(destination, source.movedim(-1, 1), x, y, mask, 1, resize_source).movedim(1, -1)
+
         return (output,)
 
 class JN_ImageCenterArea:
